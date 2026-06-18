@@ -1209,10 +1209,8 @@ void ConnectionSocket::onEvent(uint32_t events) {
 
                         // Fragment the ClientHello across TCP segments so a DPI that extracts JA4
                         // from a single packet cannot see the cipher/extension list. The first
-                        // segment is cut before cipher_suites (offset ~76), so ciphers/extensions
-                        // land in later segments. TCP_NODELAY (set above) makes each send() its own
-                        // segment. Unlike an MSS clamp this leaves post-handshake data segments
-                        // full-size, so throughput is unaffected. Cut is randomized per connection.
+                        // segment is cut before cipher_suites (offset ~76). TCP_NODELAY (set above)
+                        // makes each send() its own segment; post-handshake data is unaffected.
                         uint32_t firstCut = 24 + secureRandomBounded(40); // 24..63, before cipher_suites
                         uint32_t sentHello = 0;
                         while (sentHello < size) {
@@ -1298,6 +1296,9 @@ void ConnectionSocket::onEvent(uint32_t events) {
                 if (remaining) {
                     ssize_t sentLength;
                     if (tlsState != 0) {
+                        if (remaining > 2878) {
+                            remaining = 2878;
+                        }
                         size_t headersSize = 0;
                         if (tlsState == 1) {
                             static std::string header1 = std::string("\x14\x03\x03\x00\x01\x01", 6);
@@ -1305,26 +1306,17 @@ void ConnectionSocket::onEvent(uint32_t events) {
                             headersSize += header1.size();
                             tlsState = 2;
                         }
-                        // Start a new TLS record only once the previous one is fully flushed. The
-                        // record length is committed in the header before send(), so on a partial
-                        // send the remainder MUST continue the same record (no new header) — else
-                        // the on-wire record length would not match its payload and corrupt the
-                        // stream. (This also fixes a latent bug that the old fixed 2878 cap mostly
-                        // hid, since small records almost always flushed in one syscall.)
-                        if (tlsRecordRemaining == 0) {
-                            uint32_t recordCap = nextTlsRecordSize();
-                            tlsRecordRemaining = remaining < recordCap ? remaining : recordCap;
-                            static std::string header2 = std::string("\x17\x03\x03", 3);
-                            std::memcpy(tempBuffer->bytes + headersSize, header2.data(), header2.size());
-                            headersSize += header2.size();
-                            tempBuffer->bytes[headersSize] = static_cast<uint8_t>((tlsRecordRemaining >> 8) & 0xff);
-                            tempBuffer->bytes[headersSize + 1] = static_cast<uint8_t>(tlsRecordRemaining & 0xff);
-                            headersSize += 2;
-                        }
-                        uint32_t recordPayload = remaining < tlsRecordRemaining ? remaining : tlsRecordRemaining;
-                        std::memcpy(tempBuffer->bytes + headersSize, buffer->bytes(), recordPayload);
+                        static std::string header2 = std::string("\x17\x03\x03", 3);
+                        std::memcpy(tempBuffer->bytes + headersSize, header2.data(), header2.size());
+                        headersSize += header2.size();
 
-                        if ((sentLength = send(socketFd, tempBuffer->bytes, headersSize + recordPayload, 0)) < (ssize_t) headersSize) {
+                        tempBuffer->bytes[headersSize] = static_cast<uint8_t>((remaining >> 8) & 0xff);
+                        tempBuffer->bytes[headersSize + 1] = static_cast<uint8_t>(remaining & 0xff);
+                        headersSize += 2;
+
+                        std::memcpy(tempBuffer->bytes + headersSize, buffer->bytes(), remaining);
+
+                        if ((sentLength = send(socketFd, tempBuffer->bytes, headersSize + remaining, 0)) < headersSize) {
                             if (LOGS_ENABLED) DEBUG_E("connection(%p) send failed", this);
                             closeSocket(1, -1);
                             return;
@@ -1332,9 +1324,7 @@ void ConnectionSocket::onEvent(uint32_t events) {
                             if (ConnectionsManager::getInstance(instanceNum).delegate != nullptr) {
                                 ConnectionsManager::getInstance(instanceNum).delegate->onBytesSent((int32_t) sentLength, currentNetworkType, instanceNum);
                             }
-                            uint32_t sentPayload = (uint32_t) (sentLength - headersSize);
-                            tlsRecordRemaining -= sentPayload;
-                            outgoingByteStream->discard(sentPayload);
+                            outgoingByteStream->discard((uint32_t) (sentLength - headersSize));
                             adjustWriteOp();
                         }
                     } else {
