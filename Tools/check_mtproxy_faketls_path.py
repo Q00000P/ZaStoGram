@@ -193,13 +193,14 @@ def main() -> int:
         "proxyHandshakeClientHelloSentTime" in combined
         and "markProxyHandshakeClientHelloSent" in combined
         and "freeze" in cpp.lower(),
-        "FakeTLS admission must record ClientHello time and apply freeze-aware cooldowns",
+        "FakeTLS admission must record ClientHello time and detect freezes",
     )
     require(
-        "shouldApplyFreezeCooldown" in cpp
+        "MT_PROXY_HANDSHAKE_FREEZE_COOLDOWN_ENABLED = false" in cpp
+        and "shouldApplyFreezeCooldown" in cpp
         and "clientHelloElapsed >= MT_PROXY_HANDSHAKE_FREEZE_TIMEOUT_MS" in cpp
-        and "mtProxyApplyFreezeCooldown(state, now)" in cpp,
-        "FakeTLS cooldown must be applied only to real freezes, not every post-ClientHello close",
+        and "admission_freeze_observed" in cpp,
+        "FakeTLS freeze cooldown must stay disabled while diagnosing TSPU-style temporary endpoint bans",
     )
     require(
         "pacingDeferred" not in combined,

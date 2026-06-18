@@ -56,6 +56,7 @@ static constexpr int32_t MT_PROXY_HANDSHAKE_PRIORITY_PROXY_CHECK = 5;
 static constexpr int32_t MT_PROXY_HANDSHAKE_TIMER_ADMISSION = 1;
 static constexpr int32_t MT_PROXY_HANDSHAKE_TIMER_FREEZE = 2;
 static constexpr int64_t MT_PROXY_HANDSHAKE_FREEZE_TIMEOUT_MS = 4500;
+static constexpr bool MT_PROXY_HANDSHAKE_FREEZE_COOLDOWN_ENABLED = false;
 
 struct MtProxyHandshakeQueuedRequest {
     ConnectionSocket *socket = nullptr;
@@ -104,7 +105,7 @@ static uint32_t mtProxyHandshakeGrantDelay() {
 static uint32_t mtProxyHandshakeRetryDelay(int64_t now, int64_t cooldownUntil, int32_t priority) {
     uint32_t baseDelay = priority <= MT_PROXY_HANDSHAKE_PRIORITY_MEDIA ? 180 : 420;
     uint32_t delay = baseDelay + secureRandomBounded(priority <= MT_PROXY_HANDSHAKE_PRIORITY_MEDIA ? 181 : 421);
-    if (cooldownUntil > now) {
+    if (MT_PROXY_HANDSHAKE_FREEZE_COOLDOWN_ENABLED && cooldownUntil > now) {
         int64_t cooldownDelay = cooldownUntil - now;
         if (cooldownDelay > 5000) {
             cooldownDelay = 5000;
@@ -120,7 +121,7 @@ static uint32_t mtProxyHandshakeRetryDelay(int64_t now, int64_t cooldownUntil, i
 }
 
 static int32_t mtProxyHandshakeActiveLimit(const MtProxyHandshakeEndpointState &state, int64_t now) {
-    if (state.cooldownUntil > now) {
+    if (MT_PROXY_HANDSHAKE_FREEZE_COOLDOWN_ENABLED && state.cooldownUntil > now) {
         return 1;
     }
     if (state.recentSuccesses >= 2 && now - state.lastSuccessTime < 120000) {
@@ -156,7 +157,7 @@ static bool mtProxyTakeNextQueuedRequestLocked(const std::string &key, MtProxyHa
     int bestIndex = -1;
     for (int i = 0; i < (int) state.queuedRequests.size(); i++) {
         const auto &candidate = state.queuedRequests[i];
-        if (state.cooldownUntil > now && candidate.priority > MT_PROXY_HANDSHAKE_PRIORITY_MEDIA) {
+        if (MT_PROXY_HANDSHAKE_FREEZE_COOLDOWN_ENABLED && state.cooldownUntil > now && candidate.priority > MT_PROXY_HANDSHAKE_PRIORITY_MEDIA) {
             continue;
         }
         if (bestIndex < 0 || candidate.priority < state.queuedRequests[bestIndex].priority ||
@@ -1026,7 +1027,7 @@ bool ConnectionSocket::scheduleProxyHandshakeAdmissionIfNeeded(bool ipv6) {
     mtProxyRemoveQueuedRequestLocked(this);
     MtProxyHandshakeEndpointState &state = proxyHandshakeEndpoints[proxyHandshakeAdmissionKey];
     int32_t limit = mtProxyHandshakeActiveLimit(state, now);
-    bool cooldownBlocks = state.cooldownUntil > now && proxyHandshakeAdmissionPriority > MT_PROXY_HANDSHAKE_PRIORITY_MEDIA;
+    bool cooldownBlocks = MT_PROXY_HANDSHAKE_FREEZE_COOLDOWN_ENABLED && state.cooldownUntil > now && proxyHandshakeAdmissionPriority > MT_PROXY_HANDSHAKE_PRIORITY_MEDIA;
     if (cooldownBlocks || state.activeHandshakes >= limit || mtProxyHandshakeHasHigherPriorityQueued(state, proxyHandshakeAdmissionPriority)) {
         MtProxyHandshakeQueuedRequest request;
         request.socket = this;
@@ -1148,9 +1149,12 @@ void ConnectionSocket::releaseProxyHandshakeAdmission(bool succeeded, const char
     bool shouldApplyFreezeCooldown = proxyHandshakeAdmissionActive && proxyHandshakeClientHelloSentTime > 0 && clientHelloElapsed >= MT_PROXY_HANDSHAKE_FREEZE_TIMEOUT_MS;
     if (succeeded) {
         mtProxyRecordHandshakeSuccess(state, now);
-    } else if (shouldApplyFreezeCooldown) {
+    } else if (shouldApplyFreezeCooldown && MT_PROXY_HANDSHAKE_FREEZE_COOLDOWN_ENABLED) {
         mtProxyApplyFreezeCooldown(state, now);
         if (LOGS_ENABLED) DEBUG_D("connection(%p) mtproxy_startup admission_freeze_cooldown reason=%s key=%s penalty=%d cooldown_ms=%ld", this, reason, proxyHandshakeAdmissionKey.c_str(), state.freezePenalty, (long) std::max<int64_t>(0, state.cooldownUntil - now));
+    } else if (shouldApplyFreezeCooldown) {
+        state.recentSuccesses = 0;
+        if (LOGS_ENABLED) DEBUG_D("connection(%p) mtproxy_startup admission_freeze_observed reason=%s key=%s cooldown=disabled", this, reason, proxyHandshakeAdmissionKey.c_str());
     }
     hasNextRequest = mtProxyTakeNextQueuedRequestLocked(proxyHandshakeAdmissionKey, state, now, nextRequest);
     pthread_mutex_unlock(&proxyHandshakeSchedulerMutex);
