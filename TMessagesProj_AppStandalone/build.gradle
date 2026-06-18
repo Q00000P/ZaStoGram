@@ -77,7 +77,7 @@ android {
             minifyEnabled true
             multiDexEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), '../TMessagesProj/proguard-rules.pro'
-            ndk.debugSymbolLevel = 'FULL'
+            ndk.debugSymbolLevel = 'NONE' // sideload build: skip native symbol extraction (faster, smaller)
         }
     }
 
