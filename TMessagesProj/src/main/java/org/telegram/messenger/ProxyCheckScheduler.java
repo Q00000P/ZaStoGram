@@ -12,6 +12,7 @@ import org.telegram.tgnet.ConnectionsManager;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 public class ProxyCheckScheduler {
 
@@ -27,15 +28,44 @@ public class ProxyCheckScheduler {
         void onProxyCheckQueueFinished();
     }
 
+    public static boolean enqueueNow(int currentAccount, SharedConfig.ProxyInfo proxyInfo, Object owner, Callback callback) {
+        if (proxyInfo == null || owner == null) {
+            log("enqueue_now_rejected endpoint=" + endpoint(proxyInfo));
+            return false;
+        }
+        if (attachPending(proxyInfo, owner, callback, true)) {
+            return true;
+        }
+        clearDetachedCheckState(proxyInfo, "enqueue_now");
+        if (proxyInfo.checking) {
+            log("enqueue_now_rejected endpoint=" + endpoint(proxyInfo));
+            return false;
+        }
+        queue.add(0, new Request(currentAccount, proxyInfo, owner, callback, true));
+        log("enqueue_now endpoint=" + endpoint(proxyInfo) + " queued=" + queue.size());
+        AndroidUtilities.runOnUIThread(startNextRunnable);
+        return true;
+    }
+
     public static int enqueueStale(int currentAccount, List<SharedConfig.ProxyInfo> proxyList, Object owner, Callback callback) {
+        if (proxyList == null || owner == null) {
+            log("enqueue_rejected owner=" + owner);
+            return 0;
+        }
         int added = 0;
         for (int i = 0, count = proxyList.size(); i < count; i++) {
             SharedConfig.ProxyInfo proxyInfo = proxyList.get(i);
-            if (!shouldCheck(proxyInfo) || hasPending(proxyInfo)) {
+            if (attachPending(proxyInfo, owner, callback, false)) {
+                added++;
+                continue;
+            }
+            clearDetachedCheckState(proxyInfo, "enqueue");
+            if (!shouldCheck(proxyInfo)) {
                 continue;
             }
             queue.add(new Request(currentAccount, proxyInfo, owner, callback));
             added++;
+            log("enqueue endpoint=" + endpoint(proxyInfo) + " queued=" + queue.size());
         }
         if (added > 0) {
             AndroidUtilities.runOnUIThread(startNextRunnable);
@@ -49,14 +79,28 @@ public class ProxyCheckScheduler {
         }
         for (int i = queue.size() - 1; i >= 0; i--) {
             Request request = queue.get(i);
-            if (request.owner == owner) {
-                request.cancelled = true;
-                queue.remove(i);
+            if (request.cancelOwner(owner)) {
+                log("cancel_owner endpoint=" + endpoint(request.proxyInfo) + " queued=" + queue.size() + " listeners=" + request.activeListenerCount());
+                if (!request.hasActiveListeners()) {
+                    request.cancelled = true;
+                    queue.remove(i);
+                    log("cancel_owner request_removed endpoint=" + endpoint(request.proxyInfo) + " queued=" + queue.size());
+                }
             }
         }
-        if (activeRequest != null && activeRequest.owner == owner) {
-            activeRequest.cancelled = true;
-            activeRequest.callback = null;
+        if (activeRequest != null && activeRequest.cancelOwner(owner)) {
+            Request request = activeRequest;
+            if (!request.hasActiveListeners()) {
+                request.cancelled = true;
+                SharedConfig.ProxyInfo proxyInfo = request.proxyInfo;
+                ConnectionsManager.getInstance(request.currentAccount).cancelProxyCheck(request.nativePingId);
+                clearTransientState(proxyInfo);
+                activeRequest = null;
+                log("cancel_owner active endpoint=" + endpoint(proxyInfo));
+                AndroidUtilities.runOnUIThread(startNextRunnable, PROXY_CHECK_SPACING_MS);
+            } else {
+                log("cancel_owner active_listener endpoint=" + endpoint(request.proxyInfo) + " listeners=" + request.activeListenerCount());
+            }
         }
     }
 
@@ -64,12 +108,12 @@ public class ProxyCheckScheduler {
         if (owner == null) {
             return false;
         }
-        if (activeRequest != null && activeRequest.owner == owner && !activeRequest.cancelled) {
+        if (activeRequest != null && activeRequest.hasOwner(owner)) {
             return true;
         }
         for (int i = 0, count = queue.size(); i < count; i++) {
             Request request = queue.get(i);
-            if (request.owner == owner && !request.cancelled) {
+            if (request.hasOwner(owner)) {
                 return true;
             }
         }
@@ -77,22 +121,67 @@ public class ProxyCheckScheduler {
     }
 
     private static boolean shouldCheck(SharedConfig.ProxyInfo proxyInfo) {
+        return shouldCheck(proxyInfo, false);
+    }
+
+    private static boolean shouldCheck(SharedConfig.ProxyInfo proxyInfo, boolean force) {
         return proxyInfo != null
                 && !proxyInfo.checking
-                && SystemClock.elapsedRealtime() - proxyInfo.availableCheckTime >= PROXY_CHECK_STALE_MS;
+                && (force || !isFresh(proxyInfo));
+    }
+
+    public static boolean isFresh(SharedConfig.ProxyInfo proxyInfo) {
+        return proxyInfo != null
+                && proxyInfo.availableCheckTime != 0
+                && SystemClock.elapsedRealtime() - proxyInfo.availableCheckTime < PROXY_CHECK_STALE_MS;
+    }
+
+    public static void markConnected(SharedConfig.ProxyInfo proxyInfo) {
+        if (proxyInfo == null) {
+            return;
+        }
+        boolean changed = proxyInfo.checking || !proxyInfo.available || !isFresh(proxyInfo);
+        proxyInfo.available = true;
+        proxyInfo.availableCheckTime = SystemClock.elapsedRealtime();
+        clearTransientState(proxyInfo);
+        if (changed) {
+            log("mark_connected endpoint=" + endpoint(proxyInfo));
+        }
     }
 
     private static boolean hasPending(SharedConfig.ProxyInfo proxyInfo) {
-        if (activeRequest != null && activeRequest.proxyInfo == proxyInfo && !activeRequest.cancelled) {
-            return true;
+        return findPending(proxyInfo) != null;
+    }
+
+    private static boolean attachPending(SharedConfig.ProxyInfo proxyInfo, Object owner, Callback callback, boolean force) {
+        Request request = findPending(proxyInfo);
+        if (request == null) {
+            return false;
+        }
+        request.force = request.force || force;
+        if (request.addListener(proxyInfo, owner, callback)) {
+            proxyInfo.checking = request.proxyInfo.checking;
+            proxyInfo.proxyCheckPingId = request.proxyInfo.proxyCheckPingId;
+            log("attach_pending endpoint=" + endpoint(proxyInfo) + " listeners=" + request.activeListenerCount() + " force=" + request.force);
+        }
+        return true;
+    }
+
+    private static Request findPending(SharedConfig.ProxyInfo proxyInfo) {
+        String key = endpointKey(proxyInfo);
+        if (key == null) {
+            return null;
+        }
+        if (activeRequest != null && !activeRequest.cancelled && key.equals(endpointKey(activeRequest.proxyInfo))) {
+            return activeRequest;
         }
         for (int i = 0, count = queue.size(); i < count; i++) {
             Request request = queue.get(i);
-            if (request.proxyInfo == proxyInfo && !request.cancelled) {
-                return true;
+            if (!request.cancelled && key.equals(endpointKey(request.proxyInfo))) {
+                return request;
             }
         }
-        return false;
+        return null;
     }
 
     private static void startNext() {
@@ -104,8 +193,9 @@ public class ProxyCheckScheduler {
             if (request.cancelled) {
                 continue;
             }
-            if (!shouldCheck(request.proxyInfo)) {
-                notifyOwnerFinishedIfDrained(request);
+            if (!shouldCheck(request.proxyInfo, request.force)) {
+                log("skip_fresh endpoint=" + endpoint(request.proxyInfo) + " queued=" + queue.size());
+                notifyRequestFinishedIfDrained(request);
                 continue;
             }
             startRequest(request);
@@ -116,17 +206,96 @@ public class ProxyCheckScheduler {
     private static void startRequest(Request request) {
         activeRequest = request;
         SharedConfig.ProxyInfo proxyInfo = request.proxyInfo;
-        proxyInfo.checking = true;
+        request.setChecking(true);
+        log("start endpoint=" + endpoint(proxyInfo) + " queued=" + queue.size());
         proxyInfo.proxyCheckPingId = ConnectionsManager.getInstance(request.currentAccount).checkProxy(proxyInfo.address, proxyInfo.port, proxyInfo.username, proxyInfo.password, proxyInfo.secret, time -> AndroidUtilities.runOnUIThread(() -> finishRequest(request, time)));
+        request.nativePingId = proxyInfo.proxyCheckPingId;
+        request.setProxyCheckPingId(proxyInfo.proxyCheckPingId);
+        if (proxyInfo.proxyCheckPingId == 0) {
+            log("start_failed endpoint=" + endpoint(proxyInfo) + " reason=native_refused");
+            finishRequest(request, -1);
+        }
     }
 
     private static void finishRequest(Request request, long time) {
         if (activeRequest != request) {
             return;
         }
-        SharedConfig.ProxyInfo proxyInfo = request.proxyInfo;
-        proxyInfo.availableCheckTime = SystemClock.elapsedRealtime();
+        activeRequest = null;
+        long effectiveTime = effectiveTimeForResult(request, time);
+        applyMeasuredResult(request.proxyInfo, effectiveTime);
+        log("finish result=" + (effectiveTime == -1 ? "fail" : "ok") + " time=" + effectiveTime + " raw_time=" + time + " endpoint=" + endpoint(request.proxyInfo) + " queued=" + queue.size() + " cancelled=" + request.cancelled + " listeners=" + request.activeListenerCount());
+        for (int i = 0, count = request.listeners.size(); i < count; i++) {
+            Listener listener = request.listeners.get(i);
+            if (listener.cancelled) {
+                continue;
+            }
+            applyMeasuredResult(listener.proxyInfo, effectiveTime);
+            NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxyCheckDone, listener.proxyInfo);
+            if (listener.callback != null) {
+                listener.callback.onProxyChecked(listener.proxyInfo, effectiveTime);
+            }
+        }
+        notifyRequestFinishedIfDrained(request);
+        AndroidUtilities.runOnUIThread(startNextRunnable, PROXY_CHECK_SPACING_MS);
+    }
+
+    private static long effectiveTimeForResult(Request request, long time) {
+        if (time == -1 && isConnectedCurrentProxy(request.currentAccount, request.proxyInfo)) {
+            log("finish_keep_connected endpoint=" + endpoint(request.proxyInfo));
+            return 0;
+        }
+        return time;
+    }
+
+    private static boolean isConnectedCurrentProxy(int currentAccount, SharedConfig.ProxyInfo proxyInfo) {
+        if (proxyInfo == null || proxyInfo != SharedConfig.currentProxy) {
+            return false;
+        }
+        int state = ConnectionsManager.getInstance(currentAccount).getConnectionState();
+        return state == ConnectionsManager.ConnectionStateConnected || state == ConnectionsManager.ConnectionStateUpdating;
+    }
+
+    private static void notifyRequestFinishedIfDrained(Request request) {
+        ArrayList<Object> notifiedOwners = new ArrayList<>();
+        for (int i = 0, count = request.listeners.size(); i < count; i++) {
+            notifyListenerFinishedIfDrained(request.listeners.get(i), notifiedOwners);
+        }
+    }
+
+    private static void notifyListenerFinishedIfDrained(Listener listener, ArrayList<Object> notifiedOwners) {
+        if (listener.cancelled || listener.callback == null || hasOwnerPending(listener.owner) || alreadyNotifiedOwner(listener.owner, notifiedOwners)) {
+            return;
+        }
+        if (listener.owner != null) {
+            notifiedOwners.add(listener.owner);
+        }
+        log("drained owner=" + listener.owner);
+        listener.callback.onProxyCheckQueueFinished();
+    }
+
+    private static boolean alreadyNotifiedOwner(Object owner, ArrayList<Object> notifiedOwners) {
+        return owner != null && notifiedOwners.contains(owner);
+    }
+
+    private static void clearDetachedCheckState(SharedConfig.ProxyInfo proxyInfo, String reason) {
+        if (proxyInfo != null && proxyInfo.checking && !hasPending(proxyInfo)) {
+            clearTransientState(proxyInfo);
+            log("clear_detached endpoint=" + endpoint(proxyInfo) + " reason=" + reason);
+        }
+    }
+
+    private static void clearTransientState(SharedConfig.ProxyInfo proxyInfo) {
+        if (proxyInfo == null) {
+            return;
+        }
         proxyInfo.checking = false;
+        proxyInfo.proxyCheckPingId = 0;
+    }
+
+    private static void applyMeasuredResult(SharedConfig.ProxyInfo proxyInfo, long time) {
+        proxyInfo.availableCheckTime = SystemClock.elapsedRealtime();
+        clearTransientState(proxyInfo);
         if (time == -1) {
             proxyInfo.available = false;
             proxyInfo.ping = 0;
@@ -134,30 +303,164 @@ public class ProxyCheckScheduler {
             proxyInfo.ping = time;
             proxyInfo.available = true;
         }
-        NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxyCheckDone, proxyInfo);
-        if (!request.cancelled && request.callback != null) {
-            request.callback.onProxyChecked(proxyInfo, time);
-        }
-        activeRequest = null;
-        notifyOwnerFinishedIfDrained(request);
-        AndroidUtilities.runOnUIThread(startNextRunnable, PROXY_CHECK_SPACING_MS);
+        proxyInfo.proxyCheckPingId = 0;
     }
 
-    private static void notifyOwnerFinishedIfDrained(Request request) {
-        if (!request.cancelled && request.callback != null && !hasOwnerPending(request.owner)) {
-            request.callback.onProxyCheckQueueFinished();
+    private static void log(String message) {
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("proxy_check_scheduler " + message);
         }
+    }
+
+    private static String endpoint(SharedConfig.ProxyInfo proxyInfo) {
+        if (proxyInfo == null) {
+            return "null";
+        }
+        return proxyInfo.address + ":" + proxyInfo.port;
+    }
+
+    private static String endpointKey(SharedConfig.ProxyInfo proxyInfo) {
+        if (proxyInfo == null) {
+            return null;
+        }
+        StringBuilder builder = new StringBuilder();
+        appendKeyPart(builder, normalizeKeyPart(proxyInfo.address, true));
+        appendKeyPart(builder, String.valueOf(proxyInfo.port));
+        appendKeyPart(builder, normalizeKeyPart(proxyInfo.username, false));
+        appendKeyPart(builder, normalizeKeyPart(proxyInfo.password, false));
+        appendKeyPart(builder, normalizeKeyPart(proxyInfo.secret, false));
+        return builder.toString();
+    }
+
+    private static String normalizeKeyPart(String value, boolean lowerCase) {
+        if (value == null) {
+            return "";
+        }
+        return lowerCase ? value.toLowerCase(Locale.US) : value;
+    }
+
+    private static void appendKeyPart(StringBuilder builder, String value) {
+        builder.append(value.length()).append(':').append(value);
     }
 
     private static class Request {
         final int currentAccount;
         final SharedConfig.ProxyInfo proxyInfo;
+        final ArrayList<Listener> listeners = new ArrayList<>();
+        long nativePingId;
+        boolean force;
+        boolean cancelled;
+
+        Request(int currentAccount, SharedConfig.ProxyInfo proxyInfo, Object owner, Callback callback) {
+            this(currentAccount, proxyInfo, owner, callback, false);
+        }
+
+        Request(int currentAccount, SharedConfig.ProxyInfo proxyInfo, Object owner, Callback callback, boolean force) {
+            this.currentAccount = currentAccount;
+            this.proxyInfo = proxyInfo;
+            this.force = force;
+            addListener(proxyInfo, owner, callback);
+        }
+
+        boolean addListener(SharedConfig.ProxyInfo proxyInfo, Object owner, Callback callback) {
+            for (int i = 0, count = listeners.size(); i < count; i++) {
+                Listener listener = listeners.get(i);
+                if (!listener.cancelled && listener.owner == owner && listener.proxyInfo == proxyInfo) {
+                    return false;
+                }
+            }
+            listeners.add(new Listener(proxyInfo, owner, callback));
+            return true;
+        }
+
+        boolean cancelOwner(Object owner) {
+            boolean changed = false;
+            for (int i = 0, count = listeners.size(); i < count; i++) {
+                Listener listener = listeners.get(i);
+                if (!listener.cancelled && listener.owner == owner) {
+                    listener.cancelled = true;
+                    listener.callback = null;
+                    changed = true;
+                }
+            }
+            if (changed) {
+                clearCancelledListenerState();
+            }
+            return changed;
+        }
+
+        void clearCancelledListenerState() {
+            for (int i = 0, count = listeners.size(); i < count; i++) {
+                Listener listener = listeners.get(i);
+                if (listener.cancelled && !hasActiveListenerForProxyInfo(listener.proxyInfo)) {
+                    listener.proxyInfo.checking = false;
+                    listener.proxyInfo.proxyCheckPingId = 0;
+                }
+            }
+        }
+
+        boolean hasActiveListenerForProxyInfo(SharedConfig.ProxyInfo proxyInfo) {
+            for (int i = 0, count = listeners.size(); i < count; i++) {
+                Listener listener = listeners.get(i);
+                if (!listener.cancelled && listener.proxyInfo == proxyInfo) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        boolean hasOwner(Object owner) {
+            for (int i = 0, count = listeners.size(); i < count; i++) {
+                Listener listener = listeners.get(i);
+                if (!listener.cancelled && listener.owner == owner) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        boolean hasActiveListeners() {
+            return activeListenerCount() > 0;
+        }
+
+        int activeListenerCount() {
+            int count = 0;
+            for (int i = 0, listenersCount = listeners.size(); i < listenersCount; i++) {
+                if (!listeners.get(i).cancelled) {
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        void setChecking(boolean checking) {
+            proxyInfo.checking = checking;
+            for (int i = 0, count = listeners.size(); i < count; i++) {
+                Listener listener = listeners.get(i);
+                if (!listener.cancelled) {
+                    listener.proxyInfo.checking = checking;
+                }
+            }
+        }
+
+        void setProxyCheckPingId(long pingId) {
+            proxyInfo.proxyCheckPingId = pingId;
+            for (int i = 0, count = listeners.size(); i < count; i++) {
+                Listener listener = listeners.get(i);
+                if (!listener.cancelled) {
+                    listener.proxyInfo.proxyCheckPingId = pingId;
+                }
+            }
+        }
+    }
+
+    private static class Listener {
+        final SharedConfig.ProxyInfo proxyInfo;
         final Object owner;
         Callback callback;
         boolean cancelled;
 
-        Request(int currentAccount, SharedConfig.ProxyInfo proxyInfo, Object owner, Callback callback) {
-            this.currentAccount = currentAccount;
+        Listener(SharedConfig.ProxyInfo proxyInfo, Object owner, Callback callback) {
             this.proxyInfo = proxyInfo;
             this.owner = owner;
             this.callback = callback;

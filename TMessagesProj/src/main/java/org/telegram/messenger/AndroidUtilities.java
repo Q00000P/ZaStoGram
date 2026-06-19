@@ -4712,6 +4712,16 @@ public class AndroidUtilities {
         statusTextView[0].setDisablePaddingsOffsetY(true);
         statusTextView[0].setPadding(dp(12.66f), dp(9.33f), dp(12.66f), dp(9.33f));
         final boolean[] checking = new boolean[1];
+        final Object proxyCheckOwner = new Object();
+        final Runnable setProxyCheckFailedStatus = () -> {
+            if (!TextUtils.isEmpty(secret)) {
+                statusTextView[0].setText(getString(R.string.ProxyStatusNotRespondingNow));
+                statusTextView[0].setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText2));
+            } else {
+                statusTextView[0].setText(getString(R.string.Unavailable));
+                statusTextView[0].setTextColor(Theme.getColor(Theme.key_text_RedRegular));
+            }
+        };
         statusTextView[0].setText(replaceSingleLink(getString(R.string.ProxyBottomSheetCheckStatus), Theme.getColor(Theme.key_chat_messageLinkIn), () -> {
             if (checking[0]) return;
 
@@ -4722,18 +4732,30 @@ public class AndroidUtilities {
                 statusTextView[0].setText(getString(R.string.ProxyBottomSheetChecking) + "...");
                 statusTextView[0].clear();
                 try {
-                    ConnectionsManager.getInstance(UserConfig.selectedAccount).checkProxy(address, Integer.parseInt(port), user, password, secret, time -> AndroidUtilities.runOnUIThread(() -> {
-                        if (time == -1) {
-                            statusTextView[0].setText(getString(R.string.Unavailable));
-                            statusTextView[0].setTextColor(Theme.getColor(Theme.key_text_RedRegular));
-                        } else {
-                            statusTextView[0].setText(LocaleController.formatString(R.string.Ping2, time));
-                            statusTextView[0].setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGreenText));
+                    SharedConfig.ProxyInfo proxyInfo = new SharedConfig.ProxyInfo(address, Integer.parseInt(port), user, password, secret);
+                    boolean started = ProxyCheckScheduler.enqueueNow(UserConfig.selectedAccount, proxyInfo, proxyCheckOwner, new ProxyCheckScheduler.Callback() {
+                        @Override
+                        public void onProxyChecked(SharedConfig.ProxyInfo proxyInfo, long time) {
+                            checking[0] = false;
+                            if (time == -1) {
+                                setProxyCheckFailedStatus.run();
+                            } else {
+                                statusTextView[0].setText(LocaleController.formatString(R.string.Ping2, time));
+                                statusTextView[0].setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGreenText));
+                            }
                         }
-                    }));
+
+                        @Override
+                        public void onProxyCheckQueueFinished() {
+                        }
+                    });
+                    if (!started) {
+                        checking[0] = false;
+                        setProxyCheckFailedStatus.run();
+                    }
                 } catch (NumberFormatException ignored) {
-                    statusTextView[0].setText(getString(R.string.Unavailable));
-                    statusTextView[0].setTextColor(Theme.getColor(Theme.key_text_RedRegular));
+                    checking[0] = false;
+                    setProxyCheckFailedStatus.run();
                 }
             };
 
@@ -4816,7 +4838,11 @@ public class AndroidUtilities {
         });
         linearLayout.addView(buttonView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 48, Gravity.TOP | Gravity.FILL_HORIZONTAL, 14, 18, 14, 14));
 
-        builder.show();
+        BottomSheet bottomSheet = builder.show();
+        bottomSheet.setOnDismissListener(() -> {
+            checking[0] = false;
+            ProxyCheckScheduler.cancelOwner(proxyCheckOwner);
+        });
     }
 
     @SuppressLint("PrivateApi")

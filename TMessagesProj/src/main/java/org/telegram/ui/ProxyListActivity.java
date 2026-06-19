@@ -184,13 +184,11 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
             if (SharedConfig.currentProxy == currentInfo && useProxySettings) {
                 if (currentConnectionState == ConnectionsManager.ConnectionStateConnected || currentConnectionState == ConnectionsManager.ConnectionStateUpdating) {
                     colorKey = Theme.key_windowBackgroundWhiteBlueText6;
+                    ProxyCheckScheduler.markConnected(currentInfo);
                     if (currentInfo.ping != 0) {
                         valueTextView.setText(getString(R.string.Connected) + ", " + LocaleController.formatString("Ping", R.string.Ping, currentInfo.ping));
                     } else {
                         valueTextView.setText(getString(R.string.Connected));
-                    }
-                    if (!currentInfo.checking && !currentInfo.available) {
-                        currentInfo.availableCheckTime = 0;
                     }
                 } else {
                     colorKey = Theme.key_windowBackgroundWhiteGrayText2;
@@ -200,7 +198,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                 if (currentInfo.checking) {
                     valueTextView.setText(getString(R.string.ProxyStatusCheckingConnection));
                     colorKey = Theme.key_windowBackgroundWhiteGrayText2;
-                } else if (currentInfo.available) {
+                } else if (currentInfo.available && ProxyCheckScheduler.isFresh(currentInfo)) {
                     if (currentInfo.ping != 0) {
                         valueTextView.setText(getString(R.string.Available) + ", " + LocaleController.formatString("Ping", R.string.Ping, currentInfo.ping));
                     } else {
@@ -662,7 +660,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
             boolean checking = false;
             if (!wasCheckedAllList) {
                 for (SharedConfig.ProxyInfo info : proxyList) {
-                    if (info.checking || info.availableCheckTime == 0) {
+                    if (info.checking || !ProxyCheckScheduler.isFresh(info)) {
                         checking = true;
                         break;
                     }
@@ -799,7 +797,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                 boolean checking = false;
                 if (!wasCheckedAllList) {
                     for (SharedConfig.ProxyInfo info : proxyList) {
-                        if (info.checking || info.availableCheckTime == 0) {
+                        if (info.checking || !ProxyCheckScheduler.isFresh(info)) {
                             checking = true;
                             break;
                         }

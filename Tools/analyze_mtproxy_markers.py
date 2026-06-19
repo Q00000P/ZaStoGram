@@ -22,6 +22,16 @@ DISCONNECT_RE = re.compile(
     r"mtproxy_disconnect reason=([-0-9]+) error=([-0-9]+) "
     r"proxy_state=([-0-9]+) tls_state=([-0-9]+) bytes_read=([0-9]+)"
 )
+PROXY_CHECK_RE = re.compile(r"proxy_check_([a-z_]+)")
+PROXY_CHECK_SCHEDULER_RE = re.compile(r"proxy_check_scheduler ([a-z_]+)")
+PROXY_CHECK_RESULT_RE = re.compile(r"proxy_check_finish result=([a-z]+) reason=([^ ]+)")
+PROXY_CHECK_START_FAILED_RE = re.compile(r"proxy_check_start_failed reason=([^ ]+)")
+PROXY_CHECK_CLOSE_RE = re.compile(r"proxy_check_connection_closed close_reason=([-0-9]+)")
+PROXY_CHECK_IGNORED_CLOSE_RE = re.compile(r"proxy_check_connection_closed_ignored close_reason=([-0-9]+)")
+PROXY_ROTATION_RE = re.compile(r"proxy_rotation ([a-z_]+)")
+ENDPOINT_RE = re.compile(r"endpoint=([^ ]+)")
+SCHEDULER_LISTENERS_RE = re.compile(r"listeners=([0-9]+)")
+SCHEDULER_FORCE_RE = re.compile(r"force=(true|false)")
 
 
 @dataclass
@@ -115,6 +125,9 @@ def marker_text(line: str) -> tuple[int, str]:
     # collect_mtproxy_logs.ps1 writes: path:line_number: original log line
     match = re.match(r"^.*?:([0-9]+):\s*(.*)$", line.rstrip("\n"))
     if match:
+        prefix = line[: match.start(1) - 1]
+        if "/" not in prefix and "\\" not in prefix and not prefix.endswith((".txt", ".log")):
+            return 0, line.rstrip("\n")
         return int(match.group(1)), match.group(2)
     return 0, line.rstrip("\n")
 
@@ -148,6 +161,114 @@ def load_attempts(path: Path) -> tuple[list[Attempt], list[str]]:
     return sorted(attempts.values(), key=lambda item: (item.first_line, item.key)), global_lines
 
 
+def print_proxy_check_summary(lines: list[str]) -> None:
+    native_events: Counter[str] = Counter()
+    native_results: Counter[str] = Counter()
+    native_start_failures: Counter[str] = Counter()
+    native_close_reasons: Counter[str] = Counter()
+    native_ignored_close_reasons: Counter[str] = Counter()
+    scheduler_events: Counter[str] = Counter()
+    scheduler_endpoints: Counter[str] = Counter()
+    scheduler_coalescing: Counter[str] = Counter()
+    scheduler_listener_peaks: dict[str, int] = {}
+    scheduler_force: Counter[str] = Counter()
+    rotation_events: Counter[str] = Counter()
+
+    for text in lines:
+        rotation = PROXY_ROTATION_RE.search(text)
+        if rotation:
+            rotation_events[rotation.group(1)] += 1
+
+        if "proxy_check_scheduler " in text:
+            scheduler = PROXY_CHECK_SCHEDULER_RE.search(text)
+            event = ""
+            if scheduler:
+                event = scheduler.group(1)
+                scheduler_events[event] += 1
+            endpoint = ENDPOINT_RE.search(text)
+            if endpoint:
+                endpoint_text = endpoint.group(1)
+                scheduler_endpoints[endpoint_text] += 1
+                listeners = SCHEDULER_LISTENERS_RE.search(text)
+                if listeners:
+                    scheduler_listener_peaks[endpoint_text] = max(
+                        scheduler_listener_peaks.get(endpoint_text, 0),
+                        int(listeners.group(1)),
+                    )
+                if event in {"attach_pending", "enqueue_now", "cancel_owner"}:
+                    scheduler_coalescing[f"{event} endpoint={endpoint_text}"] += 1
+            force = SCHEDULER_FORCE_RE.search(text)
+            if force:
+                scheduler_force[force.group(1)] += 1
+            continue
+
+        native = PROXY_CHECK_RE.search(text)
+        if native:
+            native_events[native.group(1)] += 1
+            start_failed = PROXY_CHECK_START_FAILED_RE.search(text)
+            if start_failed:
+                native_start_failures[start_failed.group(1)] += 1
+            result = PROXY_CHECK_RESULT_RE.search(text)
+            if result:
+                native_results[f"{result.group(1)}:{result.group(2)}"] += 1
+            close = PROXY_CHECK_CLOSE_RE.search(text)
+            if close:
+                native_close_reasons[close.group(1)] += 1
+            ignored_close = PROXY_CHECK_IGNORED_CLOSE_RE.search(text)
+            if ignored_close:
+                native_ignored_close_reasons[ignored_close.group(1)] += 1
+
+    if not native_events and not scheduler_events and not rotation_events:
+        return
+
+    print()
+    print("Proxy-check lifecycle:")
+    if rotation_events:
+        print("  Rotation events:")
+        for event, count in rotation_events.most_common():
+            print(f"    {event}: {count}")
+    if scheduler_events:
+        print("  Java scheduler events:")
+        for event, count in scheduler_events.most_common():
+            print(f"    {event}: {count}")
+    if scheduler_coalescing:
+        print("  Scheduler coalescing:")
+        for item, count in scheduler_coalescing.most_common(10):
+            print(f"    {item}: {count}")
+    if scheduler_listener_peaks:
+        print("  Scheduler listener peaks:")
+        for endpoint, count in sorted(scheduler_listener_peaks.items(), key=lambda item: (-item[1], item[0]))[:10]:
+            print(f"    {endpoint}: {count}")
+    if scheduler_force:
+        print("  Scheduler force flags:")
+        for value, count in scheduler_force.most_common():
+            print(f"    {value}: {count}")
+    if native_events:
+        print("  Native events:")
+        for event, count in native_events.most_common():
+            print(f"    {event}: {count}")
+    if native_results:
+        print("  Native finish results:")
+        for result, count in native_results.most_common():
+            print(f"    {result}: {count}")
+    if native_start_failures:
+        print("  Native start failures:")
+        for reason, count in native_start_failures.most_common():
+            print(f"    {reason}: {count}")
+    if native_close_reasons:
+        print("  Native close reasons:")
+        for reason, count in native_close_reasons.most_common():
+            print(f"    {reason}: {count}")
+    if native_ignored_close_reasons:
+        print("  Native ignored close reasons:")
+        for reason, count in native_ignored_close_reasons.most_common():
+            print(f"    {reason}: {count}")
+    if scheduler_endpoints:
+        print("  Scheduler endpoints:")
+        for endpoint, count in scheduler_endpoints.most_common(10):
+            print(f"    {endpoint}: {count}")
+
+
 def print_report(attempts: list[Attempt], global_lines: list[str]) -> None:
     print("MTProxy FakeTLS diagnostic summary")
     print("===================================")
@@ -168,6 +289,11 @@ def print_report(attempts: list[Attempt], global_lines: list[str]) -> None:
 
     if global_lines:
         print(f"Global/non-connection markers: {len(global_lines)}")
+
+    all_lines = list(global_lines)
+    for attempt in attempts:
+        all_lines.extend(attempt.lines)
+    print_proxy_check_summary(all_lines)
 
     print()
     print("Per-attempt details:")

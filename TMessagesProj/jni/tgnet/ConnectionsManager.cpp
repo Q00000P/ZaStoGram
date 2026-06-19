@@ -44,6 +44,20 @@ jmethodID jclass_ByteBuffer_allocateDirect = nullptr;
 
 static bool done = false;
 
+static const char *proxyCheckStateName(ProxyCheckState state) {
+    switch (state) {
+        case ProxyCheckState::Queued:
+            return "queued";
+        case ProxyCheckState::Connecting:
+            return "connecting";
+        case ProxyCheckState::PingSent:
+            return "ping_sent";
+        case ProxyCheckState::Finished:
+            return "finished";
+    }
+    return "unknown";
+}
+
 ConnectionsManager::ConnectionsManager(int32_t instance) {
     instanceNum = instance;
     if ((epolFd = epoll_create(128)) == -1) {
@@ -684,25 +698,138 @@ void ConnectionsManager::scheduleNextProxyCheck() {
     }
     ProxyCheckInfo *proxyCheckInfo = proxyCheckQueue[0].release();
     proxyCheckQueue.erase(proxyCheckQueue.begin());
+    proxyCheckInfo->state = ProxyCheckState::Queued;
     if (LOGS_ENABLED) DEBUG_D("proxy_check_next queued=%d", (int32_t) proxyCheckQueue.size());
     scheduleCheckProxyInternal(proxyCheckInfo);
 }
 
-void ConnectionsManager::finishProxyCheck(std::vector<std::unique_ptr<ProxyCheckInfo>>::iterator iter, int64_t time, const char *reason, bool requestFound) {
-    ProxyCheckInfo *proxyCheckInfo = iter->get();
+void ConnectionsManager::failProxyCheckStart(ProxyCheckInfo *proxyCheckInfo, const char *reason) {
+    if (proxyCheckInfo == nullptr) {
+        return;
+    }
+    proxyCheckInfo->finished = true;
+    proxyCheckInfo->state = ProxyCheckState::Finished;
+
+    auto callback = proxyCheckInfo->onRequestTime;
+#ifdef ANDROID
+    jobject requestTimeRef = proxyCheckInfo->ptr1;
+    proxyCheckInfo->ptr1 = nullptr;
+#endif
+
     if (LOGS_ENABLED) DEBUG_D(
-        "proxy_check_finish result=%s reason=%s request_found=%d ping_id=%" PRId64 " address=%s:%u connection_num=%d queued=%d",
-        time >= 0 ? "ok" : "fail",
+        "proxy_check_start_failed reason=%s ping_id=%" PRId64 " address=%s:%u state=%s queued=%d",
+        reason,
+        proxyCheckInfo->pingId,
+        proxyCheckInfo->address.c_str(),
+        (uint32_t) proxyCheckInfo->port,
+        proxyCheckStateName(proxyCheckInfo->state),
+        (int32_t) proxyCheckQueue.size());
+    scheduleNextProxyCheck();
+    if (callback) {
+        callback(-1);
+    }
+#ifdef ANDROID
+    if (requestTimeRef != nullptr) {
+        DEBUG_DELREF("tgnet (2) request ptr1");
+        jniEnv[instanceNum]->DeleteGlobalRef(requestTimeRef);
+    }
+#endif
+    delete proxyCheckInfo;
+}
+
+bool ConnectionsManager::isProxyCheckRequestActive(int32_t requestToken) {
+    if (requestToken == 0) {
+        return false;
+    }
+    for (auto &proxyActiveCheck : proxyActiveChecks) {
+        ProxyCheckInfo *proxyCheckInfo = proxyActiveCheck.get();
+        if (!proxyCheckInfo->finished && proxyCheckInfo->requestToken == requestToken) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ConnectionsManager::eraseProxyCheckRequest(int32_t requestToken, int64_t *requestTime) {
+    if (requestTime != nullptr) {
+        *requestTime = -1;
+    }
+    for (auto iter = runningRequests.begin(); iter != runningRequests.end(); iter++) {
+        Request *request = iter->get();
+        if (request->requestToken == requestToken && (request->connectionType & 0x0000ffff) == ConnectionTypeProxy) {
+            if (requestTime != nullptr && request->startTimeMillis > 0) {
+                *requestTime = llabs(getCurrentTimeMonotonicMillis() - request->startTimeMillis);
+            }
+            request->completed = true;
+            if (LOGS_ENABLED) DEBUG_D("proxy_check_request_erase source=running token=%d message_id=0x%" PRIx64, request->requestToken, request->messageId);
+            runningRequests.erase(iter);
+            return true;
+        }
+    }
+    for (auto iter = requestsQueue.begin(); iter != requestsQueue.end(); iter++) {
+        Request *request = iter->get();
+        if (request->requestToken == requestToken && (request->connectionType & 0x0000ffff) == ConnectionTypeProxy) {
+            request->completed = true;
+            if (LOGS_ENABLED) DEBUG_D("proxy_check_request_erase source=queued token=%d message_id=0x%" PRIx64, request->requestToken, request->messageId);
+            requestsQueue.erase(iter);
+            return true;
+        }
+    }
+    return false;
+}
+
+void ConnectionsManager::finishProxyCheck(std::vector<std::unique_ptr<ProxyCheckInfo>>::iterator iter, int64_t time, const char *reason, Connection *connection, bool notifyCallback) {
+    ProxyCheckInfo *proxyCheckInfo = iter->get();
+    if (proxyCheckInfo->finished) {
+        if (LOGS_ENABLED) DEBUG_D("proxy_check_finish duplicate reason=%s ping_id=%" PRId64 " state=%s", reason, proxyCheckInfo->pingId, proxyCheckStateName(proxyCheckInfo->state));
+        return;
+    }
+    proxyCheckInfo->finished = true;
+    proxyCheckInfo->state = ProxyCheckState::Finished;
+
+    int64_t requestTime = -1;
+    bool requestFound = eraseProxyCheckRequest(proxyCheckInfo->requestToken, time >= 0 ? &requestTime : nullptr);
+    if (time >= 0) {
+        if (requestTime >= 0) {
+            time = requestTime;
+        } else if (proxyCheckInfo->startedAtMillis > 0) {
+            time = llabs(getCurrentTimeMonotonicMillis() - proxyCheckInfo->startedAtMillis);
+        }
+    } else if (!requestFound && LOGS_ENABLED) {
+        DEBUG_D("proxy_check_finish request_missing reason=%s ping_id=%" PRId64 " connection_num=%d", reason, proxyCheckInfo->pingId, proxyCheckInfo->connectionNum);
+    }
+
+    auto callback = proxyCheckInfo->onRequestTime;
+#ifdef ANDROID
+    jobject requestTimeRef = proxyCheckInfo->ptr1;
+    proxyCheckInfo->ptr1 = nullptr;
+#endif
+
+    if (LOGS_ENABLED) DEBUG_D(
+        "proxy_check_finish result=%s reason=%s request_found=%d ping_id=%" PRId64 " address=%s:%u connection_num=%d state=%s queued=%d",
+        !notifyCallback ? "cancelled" : (time >= 0 ? "ok" : "fail"),
         reason,
         requestFound ? 1 : 0,
         proxyCheckInfo->pingId,
         proxyCheckInfo->address.c_str(),
         (uint32_t) proxyCheckInfo->port,
         proxyCheckInfo->connectionNum,
+        proxyCheckStateName(proxyCheckInfo->state),
         (int32_t) proxyCheckQueue.size());
-    proxyCheckInfo->onRequestTime(time);
     proxyActiveChecks.erase(iter);
+    if (connection != nullptr && connection->getConnectionType() == ConnectionTypeProxy) {
+        connection->suspendConnection(false);
+    }
     scheduleNextProxyCheck();
+    if (notifyCallback && callback) {
+        callback(time);
+    }
+#ifdef ANDROID
+    if (requestTimeRef != nullptr) {
+        DEBUG_DELREF("tgnet (2) request ptr1");
+        jniEnv[instanceNum]->DeleteGlobalRef(requestTimeRef);
+    }
+#endif
 }
 
 void ConnectionsManager::onConnectionClosed(Connection *connection, int reason) {
@@ -776,29 +903,25 @@ void ConnectionsManager::onConnectionClosed(Connection *connection, int reason) 
         sendingPushPing = false;
         lastPushPingTime = getCurrentTimeMonotonicMillis() - nextPingTimeOffset + 4000;
     } else if (connection->getConnectionType() == ConnectionTypeProxy) {
-        scheduleTask([&, connection, reason] {
-            for (auto iter = proxyActiveChecks.begin(); iter != proxyActiveChecks.end(); iter++) {
-                ProxyCheckInfo *proxyCheckInfo = iter->get();
-                if (proxyCheckInfo->connectionNum == connection->getConnectionNum()) {
-                    bool found = false;
-                    for (auto iter2 = runningRequests.begin(); iter2 != runningRequests.end(); iter2++) {
-                        Request *request = iter2->get();
-                        if (connection->getConnectionToken() == request->connectionToken && request->requestToken == proxyCheckInfo->requestToken && (request->connectionType & 0x0000ffff) == ConnectionTypeProxy) {
-                            request->completed = true;
-                            DEBUG_D("2) erase request %d 0x%" PRIx64, request->requestToken, request->messageId);
-                            runningRequests.erase(iter2);
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found && LOGS_ENABLED) {
-                        DEBUG_D("proxy_check_finish request_missing close_reason=%d ping_id=%" PRId64 " connection_num=%d", reason, proxyCheckInfo->pingId, proxyCheckInfo->connectionNum);
-                    }
-                    finishProxyCheck(iter, -1, "connection_closed", found);
-                    break;
-                }
+        bool handled = false;
+        for (auto iter = proxyActiveChecks.begin(); iter != proxyActiveChecks.end(); iter++) {
+            ProxyCheckInfo *proxyCheckInfo = iter->get();
+            if (proxyCheckInfo->connectionNum == connection->getConnectionNum()) {
+                handled = true;
+                if (LOGS_ENABLED) DEBUG_D(
+                    "proxy_check_connection_closed close_reason=%d ping_id=%" PRId64 " request_token=%d connection_num=%d state=%s",
+                    reason,
+                    proxyCheckInfo->pingId,
+                    proxyCheckInfo->requestToken,
+                    proxyCheckInfo->connectionNum,
+                    proxyCheckStateName(proxyCheckInfo->state));
+                finishProxyCheck(iter, -1, "connection_closed", connection, true);
+                break;
             }
-        });
+        }
+        if (!handled && LOGS_ENABLED) {
+            DEBUG_D("proxy_check_connection_closed_ignored close_reason=%d connection_num=%d", reason, connection->getConnectionNum());
+        }
     }
 }
 
@@ -808,6 +931,23 @@ void ConnectionsManager::onConnectionConnected(Connection *connection) {
     if ((connectionType == ConnectionTypeGeneric || connectionType == ConnectionTypeGenericMedia) && datacenter->isHandshakingAny()) {
         datacenter->onHandshakeConnectionConnected(connection);
         return;
+    }
+
+    if (connectionType == ConnectionTypeProxy) {
+        for (auto &proxyActiveCheck : proxyActiveChecks) {
+            ProxyCheckInfo *proxyCheckInfo = proxyActiveCheck.get();
+            if (!proxyCheckInfo->finished && proxyCheckInfo->connectionNum == connection->getConnectionNum()) {
+                proxyCheckInfo->connectionToken = connection->getConnectionToken();
+                if (LOGS_ENABLED) DEBUG_D(
+                    "proxy_check_socket_connected ping_id=%" PRId64 " request_token=%d connection_num=%d connection_token=%u state=%s",
+                    proxyCheckInfo->pingId,
+                    proxyCheckInfo->requestToken,
+                    proxyCheckInfo->connectionNum,
+                    proxyCheckInfo->connectionToken,
+                    proxyCheckStateName(proxyCheckInfo->state));
+                break;
+            }
+        }
     }
 
     if (datacenter->hasAuthKey(connectionType, 1)) {
@@ -1193,24 +1333,9 @@ void ConnectionsManager::processServerResponse(TLObject *message, int64_t messag
                 for (auto iter = proxyActiveChecks.begin(); iter != proxyActiveChecks.end(); iter++) {
                     ProxyCheckInfo *proxyCheckInfo = iter->get();
                     if (proxyCheckInfo->pingId == response->ping_id) {
-                        bool found = false;
-                        int64_t ping = -1;
-                        for (auto iter2 = runningRequests.begin(); iter2 != runningRequests.end(); iter2++) {
-                            Request *request = iter2->get();
-                            if (request->requestToken == proxyCheckInfo->requestToken) {
-                                ping = llabs(getCurrentTimeMonotonicMillis() - request->startTimeMillis);
-                                if (LOGS_ENABLED) DEBUG_D("got ping response for request %p, %" PRId64, request->rawRequest, ping);
-                                request->completed = true;
-                                DEBUG_D("3) erase request %d 0x%" PRIx64, request->requestToken, request->messageId);
-                                runningRequests.erase(iter2);
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found && LOGS_ENABLED) {
-                            DEBUG_D("proxy_check_finish request_missing pong_id=%" PRId64 " connection_num=%d", proxyCheckInfo->pingId, proxyCheckInfo->connectionNum);
-                        }
-                        finishProxyCheck(iter, ping, found ? "pong" : "pong_request_missing", found);
+                        int64_t ping = 0;
+                        if (LOGS_ENABLED) DEBUG_D("got ping response for proxy check ping_id=%" PRId64 " connection_num=%d", proxyCheckInfo->pingId, proxyCheckInfo->connectionNum);
+                        finishProxyCheck(iter, ping, "pong", connection, true);
                         break;
                     }
                 }
@@ -1907,10 +2032,11 @@ int32_t ConnectionsManager::sendRequestInternal(TLObject *object, onCompleteFunc
     request->rpcRequest = wrapInLayer(object, getDatacenterWithId(datacenterId), request);
     auto cancelledIterator = tokensToBeCancelled.find(request->requestToken);
     if (cancelledIterator != tokensToBeCancelled.end()) {
+        int32_t cancelledToken = request->requestToken;
         if (LOGS_ENABLED) DEBUG_D("(3) request is cancelled before sending, token %d", request->requestToken);
         tokensToBeCancelled.erase(cancelledIterator);
         delete request;
-        return request->requestToken;
+        return cancelledToken;
     }
     if (!currentUserId && !(flags & RequestFlagWithoutLogin)) {
         if (LOGS_ENABLED) DEBUG_D("can't do request without login %s, reschedule token %d", typeid(*object).name(), request->requestToken);
@@ -1942,6 +2068,7 @@ int32_t ConnectionsManager::sendRequest(TLObject *object, onCompleteFunc onCompl
             if (LOGS_ENABLED) DEBUG_D("(1) request is cancelled before sending, token %d", requestToken);
             tokensToBeCancelled.erase(cancelledIterator);
             delete request;
+            return;
         }
         if (!currentUserId && !(flags & RequestFlagWithoutLogin)) {
             if (LOGS_ENABLED) DEBUG_D("can't do request without login %s, reschedule token %d", typeid(*object).name(), requestToken);
@@ -2282,9 +2409,7 @@ void ConnectionsManager::onDatacenterHandshakeComplete(Datacenter *datacenter, H
     }
     processRequestQueue(AllConnectionTypes, datacenterId);
     if (type == HandshakeTypeTemp && !proxyCheckQueue.empty()) {
-        ProxyCheckInfo *proxyCheckInfo = proxyCheckQueue[0].release();
-        proxyCheckQueue.erase(proxyCheckQueue.begin());
-        scheduleCheckProxyInternal(proxyCheckInfo);
+        scheduleNextProxyCheck();
     }
 }
 
@@ -2473,6 +2598,13 @@ void ConnectionsManager::processRequestQueue(uint32_t connectionTypes, uint32_t 
             continue;
         }
         const std::type_info &typeInfo = typeid(*request->rawRequest);
+        const bool proxyCheckRequest = (request->connectionType & 0x0000ffff) == ConnectionTypeProxy;
+        if (proxyCheckRequest && !isProxyCheckRequestActive(request->requestToken)) {
+            request->completed = true;
+            if (LOGS_ENABLED) DEBUG_D("proxy_check_request_stale source=running token=%d message_id=0x%" PRIx64, request->requestToken, request->messageId);
+            iter = runningRequests.erase(iter);
+            continue;
+        }
 
         uint32_t datacenterId = request->datacenterId;
         if (datacenterId == DEFAULT_DATACENTER_ID) {
@@ -2731,6 +2863,13 @@ void ConnectionsManager::processRequestQueue(uint32_t connectionTypes, uint32_t 
             iter = requestsQueue.erase(iter);
             if (LOGS_ENABLED)
                 DEBUG_D("skip queue, token = %d: cancelled", request->requestToken);
+            continue;
+        }
+        const bool proxyCheckRequest = (request->connectionType & 0x0000ffff) == ConnectionTypeProxy;
+        if (proxyCheckRequest && !isProxyCheckRequestActive(request->requestToken)) {
+            request->completed = true;
+            if (LOGS_ENABLED) DEBUG_D("proxy_check_request_stale source=queued token=%d message_id=0x%" PRIx64, request->requestToken, request->messageId);
+            iter = requestsQueue.erase(iter);
             continue;
         }
         if (hasInvokeWaitMessage && (request->requestFlags & RequestFlagInvokeAfter) != 0 && (request->requestFlags & RequestFlagResendAfter) == 0) {
@@ -3894,10 +4033,51 @@ int64_t ConnectionsManager::checkProxy(std::string address, uint16_t port, std::
     proxyCheckInfo->pingId = ++lastPingProxyId;
     proxyCheckInfo->instanceNum = instanceNum;
     proxyCheckInfo->ptr1 = ptr1;
+    int64_t pingId = proxyCheckInfo->pingId;
 
     scheduleCheckProxyInternal(proxyCheckInfo);
 
-    return proxyCheckInfo->pingId;
+    return pingId;
+}
+
+void ConnectionsManager::cancelProxyCheck(int64_t pingId) {
+    if (pingId == 0) {
+        return;
+    }
+    scheduleTask([&, pingId] {
+        for (auto iter = proxyActiveChecks.begin(); iter != proxyActiveChecks.end(); iter++) {
+            ProxyCheckInfo *proxyCheckInfo = iter->get();
+            if (proxyCheckInfo->pingId == pingId) {
+                Connection *connection = nullptr;
+                Datacenter *datacenter = getDatacenterWithId(DEFAULT_DATACENTER_ID);
+                if (datacenter != nullptr) {
+                    connection = datacenter->getProxyConnection((uint8_t) proxyCheckInfo->connectionNum, false, false);
+                }
+                if (LOGS_ENABLED) DEBUG_D("proxy_check_cancel source=active ping_id=%" PRId64 " request_token=%d connection_num=%d reason=cancelled", proxyCheckInfo->pingId, proxyCheckInfo->requestToken, proxyCheckInfo->connectionNum);
+                finishProxyCheck(iter, -1, "cancelled", connection, false);
+                return;
+            }
+        }
+        for (auto iter = proxyCheckQueue.begin(); iter != proxyCheckQueue.end(); iter++) {
+            ProxyCheckInfo *proxyCheckInfo = iter->get();
+            if (proxyCheckInfo->pingId == pingId) {
+#ifdef ANDROID
+                jobject requestTimeRef = proxyCheckInfo->ptr1;
+                proxyCheckInfo->ptr1 = nullptr;
+#endif
+                if (LOGS_ENABLED) DEBUG_D("proxy_check_cancel source=queued ping_id=%" PRId64 " reason=cancelled", proxyCheckInfo->pingId);
+                proxyCheckQueue.erase(iter);
+#ifdef ANDROID
+                if (requestTimeRef != nullptr) {
+                    DEBUG_DELREF("tgnet (2) request ptr1");
+                    jniEnv[instanceNum]->DeleteGlobalRef(requestTimeRef);
+                }
+#endif
+                return;
+            }
+        }
+        if (LOGS_ENABLED) DEBUG_D("proxy_check_cancel source=missing ping_id=%" PRId64 " reason=cancelled", pingId);
+    });
 }
 
 void ConnectionsManager::scheduleCheckProxyInternal(ProxyCheckInfo *proxyCheckInfo) {
@@ -3924,24 +4104,45 @@ void ConnectionsManager::checkProxyInternal(ProxyCheckInfo *proxyCheckInfo) {
         }
     }
     if (freeConnectionNum == -1) {
+        proxyCheckInfo->state = ProxyCheckState::Queued;
+        if (LOGS_ENABLED) DEBUG_D("proxy_check_start state=%s action=queued ping_id=%" PRId64 " address=%s:%u queued=%d", proxyCheckStateName(proxyCheckInfo->state), proxyCheckInfo->pingId, proxyCheckInfo->address.c_str(), (uint32_t) proxyCheckInfo->port, (int32_t) proxyCheckQueue.size() + 1);
         proxyCheckQueue.push_back(std::unique_ptr<ProxyCheckInfo>(proxyCheckInfo));
     } else {
         auto connectionType = (ConnectionType) (ConnectionTypeProxy | (freeConnectionNum << 16));
         Datacenter *datacenter = getDatacenterWithId(DEFAULT_DATACENTER_ID);
+        if (datacenter == nullptr) {
+            failProxyCheckStart(proxyCheckInfo, "missing_datacenter");
+            return;
+        }
         Connection *connection = datacenter->getProxyConnection((uint8_t) freeConnectionNum, true, false);
         if (connection != nullptr) {
+            proxyCheckInfo->state = ProxyCheckState::Connecting;
+            proxyCheckInfo->startedAtMillis = getCurrentTimeMonotonicMillis();
             connection->setOverrideProxy(proxyCheckInfo->address, proxyCheckInfo->port, proxyCheckInfo->username, proxyCheckInfo->password, proxyCheckInfo->secret, proxyCheckInfo->mtProxyTlsProfile);
             connection->suspendConnection();
             proxyCheckInfo->connectionNum = freeConnectionNum;
             auto request = new TL_ping();
             request->ping_id = proxyCheckInfo->pingId;
             proxyCheckInfo->requestToken = sendRequest(request, nullptr, nullptr, nullptr, RequestFlagEnableUnauthorized | RequestFlagWithoutLogin, DEFAULT_DATACENTER_ID, connectionType, true, 0);
+            proxyCheckInfo->state = ProxyCheckState::PingSent;
+            if (LOGS_ENABLED) DEBUG_D(
+                "proxy_check_start state=%s ping_id=%" PRId64 " request_token=%d address=%s:%u connection_num=%d",
+                proxyCheckStateName(proxyCheckInfo->state),
+                proxyCheckInfo->pingId,
+                proxyCheckInfo->requestToken,
+                proxyCheckInfo->address.c_str(),
+                (uint32_t) proxyCheckInfo->port,
+                proxyCheckInfo->connectionNum);
             proxyActiveChecks.push_back(std::unique_ptr<ProxyCheckInfo>(proxyCheckInfo));
         } else if (PFS_ENABLED) {
             if (datacenter->isHandshaking(false)) {
                 datacenter->beginHandshake(HandshakeTypeTemp, false);
             }
+            proxyCheckInfo->state = ProxyCheckState::Queued;
+            if (LOGS_ENABLED) DEBUG_D("proxy_check_start state=%s action=queued_wait_handshake ping_id=%" PRId64 " address=%s:%u queued=%d", proxyCheckStateName(proxyCheckInfo->state), proxyCheckInfo->pingId, proxyCheckInfo->address.c_str(), (uint32_t) proxyCheckInfo->port, (int32_t) proxyCheckQueue.size() + 1);
             proxyCheckQueue.push_back(std::unique_ptr<ProxyCheckInfo>(proxyCheckInfo));
+        } else {
+            failProxyCheckStart(proxyCheckInfo, "connection_unavailable");
         }
     }
 }

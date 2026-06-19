@@ -331,6 +331,10 @@ jlong checkProxy(JNIEnv *env, jclass c, jint instanceNum, jstring address, jint 
     return result;
 }
 
+void cancelProxyCheck(JNIEnv *env, jclass c, jint instanceNum, jlong pingId) {
+    ConnectionsManager::getInstance(instanceNum).cancelProxyCheck((int64_t) pingId);
+}
+
 class Delegate : public ConnectiosManagerDelegate {
     
     void onUpdate(int32_t instanceNum) {
@@ -554,6 +558,7 @@ static JNINativeMethod ConnectionsManagerMethods[] = {
         {"native_setJava", "(Z)V", (void *) setJava},
         {"native_applyDnsConfig", "(IJLjava/lang/String;I)V", (void *) applyDnsConfig},
         {"native_checkProxy", "(ILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;ILorg/telegram/tgnet/RequestTimeDelegate;)J", (void *) checkProxy},
+        {"native_cancelProxyCheck", "(IJ)V", (void *) cancelProxyCheck},
         {"native_onHostNameResolved", "(Ljava/lang/String;JLjava/lang/String;)V", (void *) onHostNameResolved},
         {"native_discardConnection", "(III)V", (void *) discardConnection},
         {"native_failNotRunningRequest", "(II)V", (void *) failNotRunningRequest},

@@ -742,6 +742,12 @@ public class ConnectionsManager extends BaseController {
         return native_checkProxy(currentAccount, address, port, username, password, secret, mtProxyTlsProfile, requestTimeDelegate);
     }
 
+    public void cancelProxyCheck(long pingId) {
+        if (pingId != 0) {
+            native_cancelProxyCheck(currentAccount, pingId);
+        }
+    }
+
     public void setAppPaused(final boolean value, final boolean byScreenState) {
         if (!byScreenState) {
             appPaused = value;
@@ -1056,6 +1062,7 @@ public class ConnectionsManager extends BaseController {
     public static native void native_setPushConnectionEnabled(int currentAccount, boolean value);
     public static native void native_applyDnsConfig(int currentAccount, long address, String phone, int date);
     public static native long native_checkProxy(int currentAccount, String address, int port, String username, String password, String secret, int mtProxyTlsProfile, RequestTimeDelegate requestTimeDelegate);
+    public static native void native_cancelProxyCheck(int currentAccount, long pingId);
     public static native void native_onHostNameResolved(String host, long address, String ip);
     public static native void native_discardConnection(int currentAccount, int datacenterId, int connectionType);
     public static native void native_failNotRunningRequest(int currentAccount, int token);

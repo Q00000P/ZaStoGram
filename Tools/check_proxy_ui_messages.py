@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STRINGS = ROOT / "TMessagesProj/src/main/res/values/strings.xml"
 PROXY_LIST = ROOT / "TMessagesProj/src/main/java/org/telegram/ui/ProxyListActivity.java"
 PROXY_SETTINGS = ROOT / "TMessagesProj/src/main/java/org/telegram/ui/ProxySettingsActivity.java"
+ANDROID_UTILITIES = ROOT / "TMessagesProj/src/main/java/org/telegram/messenger/AndroidUtilities.java"
 
 checks = [
     (STRINGS, 'name="ProxyStatusConnectingSlow"', "missing slow connecting proxy status string"),
@@ -18,7 +19,20 @@ checks = [
     (PROXY_LIST, "R.string.ProxyStatusNotRespondingNow", "proxy list does not use neutral MTProto failure text"),
     (PROXY_LIST, "TextUtils.isEmpty(currentInfo.secret)", "proxy list does not distinguish MTProto from SOCKS failures"),
     (PROXY_SETTINGS, "R.string.UseProxyTelegramInfoStealth", "proxy settings does not show MTProto stealth hint"),
+    (ANDROID_UTILITIES, "ProxyCheckScheduler.enqueueNow", "bottom-sheet proxy check must use the shared scheduler instead of direct native checkProxy"),
+    (ANDROID_UTILITIES, "new SharedConfig.ProxyInfo", "bottom-sheet proxy check must pass through the shared ProxyInfo lifecycle"),
+    (ANDROID_UTILITIES, "final Object proxyCheckOwner", "bottom-sheet proxy check must have an owner for lifecycle cancellation"),
+    (ANDROID_UTILITIES, "ProxyCheckScheduler.cancelOwner(proxyCheckOwner)", "bottom-sheet proxy check must cancel queued or active work when the sheet is dismissed"),
+    (ANDROID_UTILITIES, "R.string.ProxyStatusNotRespondingNow", "bottom-sheet MTProxy failures must use the neutral temporary failure text"),
+    (ANDROID_UTILITIES, "if (!started)", "bottom-sheet proxy check must fail fast when the scheduler refuses to start"),
+    (ANDROID_UTILITIES, "checking[0] = false;", "bottom-sheet proxy check must clear its checking flag on every terminal path"),
 ]
+
+android_utilities_text = ANDROID_UTILITIES.read_text(encoding="utf-8")
+if "ConnectionsManager.getInstance(UserConfig.selectedAccount).checkProxy" in android_utilities_text:
+    print("Proxy UI message guard failed:")
+    print(f" - {ANDROID_UTILITIES.relative_to(ROOT)}: bottom-sheet proxy check must not bypass ProxyCheckScheduler")
+    sys.exit(1)
 
 failed = []
 for path, needle, message in checks:

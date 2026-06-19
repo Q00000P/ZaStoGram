@@ -78,6 +78,7 @@ public:
     void setPushConnectionEnabled(bool value);
     void applyDnsConfig(NativeByteBuffer *buffer, std::string phone, int32_t date);
     int64_t checkProxy(std::string address, uint16_t port, std::string username, std::string password, std::string secret, int32_t mtProxyTlsProfile, onRequestTimeFunc requestTimeFunc, jobject ptr1);
+    void cancelProxyCheck(int64_t pingId);
 
 #ifdef ANDROID
     void sendRequest(TLObject *object, onCompleteFunc onComplete, onQuickAckFunc onQuickAck, onWriteToSocketFunc onWriteToSocket, onRequestClearFunc onClear, uint32_t flags, uint32_t datacenterId, ConnectionType connectionType, bool immediate, int32_t requestToken);
@@ -137,7 +138,10 @@ private:
 
     void scheduleCheckProxyInternal(ProxyCheckInfo *proxyCheckInfo);
     void checkProxyInternal(ProxyCheckInfo *proxyCheckInfo);
-    void finishProxyCheck(std::vector<std::unique_ptr<ProxyCheckInfo>>::iterator iter, int64_t time, const char *reason, bool requestFound);
+    void failProxyCheckStart(ProxyCheckInfo *proxyCheckInfo, const char *reason);
+    bool isProxyCheckRequestActive(int32_t requestToken);
+    bool eraseProxyCheckRequest(int32_t requestToken, int64_t *requestTime);
+    void finishProxyCheck(std::vector<std::unique_ptr<ProxyCheckInfo>>::iterator iter, int64_t time, const char *reason, Connection *connection, bool notifyCallback);
     void scheduleNextProxyCheck();
 
     int32_t instanceNum = 0;

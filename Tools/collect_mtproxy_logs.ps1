@@ -161,7 +161,7 @@ New-Item -ItemType Directory -Force -Path $deviceLogsDir | Out-Null
 Invoke-Adb shell ls -la $remoteLogDir 2>&1 | Tee-Object -FilePath (Join-Path $sessionDir "device_logs_ls.txt") | Out-Null
 Invoke-Adb pull $remoteLogDir $deviceLogsDir 2>&1 | Tee-Object -FilePath (Join-Path $sessionDir "adb_pull_logs.txt") | Out-Null
 
-$markerPattern = "mtproxy_startup|mtproxy_disconnect|client_hello|server_hello|first_tls|tls_alert|recv_eof|admission_|socket_connected|on_connected|TLS response|TLS server hello|TLS pending|ClientHello pending|socket error|EPOLLHUP|EPOLLRDHUP"
+$markerPattern = "mtproxy_startup|mtproxy_disconnect|proxy_check_|proxy_check_scheduler|proxy_rotation|client_hello|server_hello|first_tls|tls_alert|recv_eof|admission_|socket_connected|on_connected|TLS response|TLS server hello|TLS pending|ClientHello pending|socket error|EPOLLHUP|EPOLLRDHUP"
 $markerPath = Join-Path $sessionDir "mtproxy_markers.txt"
 $textFiles = Get-ChildItem -Path $sessionDir -Recurse -File -Include "*.txt", "*.log" -ErrorAction SilentlyContinue
 $matches = foreach ($file in $textFiles) {

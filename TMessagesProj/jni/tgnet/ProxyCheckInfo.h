@@ -9,6 +9,7 @@
 #ifndef PROXYCHECKINFO_H
 #define PROXYCHECKINFO_H
 
+#include <stdint.h>
 #include <sstream>
 #include "Defines.h"
 
@@ -16,13 +17,24 @@
 #include <jni.h>
 #endif
 
+enum class ProxyCheckState : uint8_t {
+    Queued,
+    Connecting,
+    PingSent,
+    Finished,
+};
+
 class ProxyCheckInfo {
 
 public:
     ~ProxyCheckInfo();
 
+    ProxyCheckState state = ProxyCheckState::Queued;
     int32_t connectionNum = 0;
     int32_t requestToken = 0;
+    uint32_t connectionToken = 0;
+    int64_t startedAtMillis = 0;
+    bool finished = false;
     std::string address;
     uint16_t port = 1080;
     std::string username;
