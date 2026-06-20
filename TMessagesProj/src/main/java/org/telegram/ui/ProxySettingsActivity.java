@@ -113,6 +113,8 @@ public class ProxySettingsActivity extends BaseFragment {
     private ClipboardManager clipboardManager;
 
     private boolean addingNewProxy;
+    private boolean proxyTypeLocked;
+    private boolean saveAsWssSocksUpstream;
 
     private SharedConfig.ProxyInfo currentProxyInfo;
 
@@ -174,6 +176,22 @@ public class ProxySettingsActivity extends BaseFragment {
         super();
         currentProxyInfo = new SharedConfig.ProxyInfo("", 1080, "", "", "");
         addingNewProxy = true;
+    }
+
+    public static ProxySettingsActivity createWssSocksUpstream() {
+        ProxySettingsActivity activity = new ProxySettingsActivity();
+        activity.initialType = TYPE_SOCKS5;
+        activity.proxyTypeLocked = true;
+        activity.saveAsWssSocksUpstream = true;
+        return activity;
+    }
+
+    public static ProxySettingsActivity createWssSocksUpstream(SharedConfig.ProxyInfo proxyInfo) {
+        ProxySettingsActivity activity = new ProxySettingsActivity(proxyInfo);
+        activity.initialType = TYPE_SOCKS5;
+        activity.proxyTypeLocked = true;
+        activity.saveAsWssSocksUpstream = true;
+        return activity;
     }
 
     public ProxySettingsActivity(int type) {
@@ -261,14 +279,19 @@ public class ProxySettingsActivity extends BaseFragment {
 
                     SharedPreferences preferences = MessagesController.getGlobalMainSettings();
                     SharedPreferences.Editor editor = preferences.edit();
+                    boolean saveForWssSocksUpstream = saveAsWssSocksUpstream && currentType == TYPE_SOCKS5;
+                    boolean reapplyWssTransport = false;
                     boolean enabled;
                     if (addingNewProxy) {
                         SharedConfig.addProxy(currentProxyInfo);
                         SharedConfig.currentProxy = currentProxyInfo;
-                        editor.putBoolean("proxy_enabled", true);
-                        enabled = true;
+                        enabled = !saveForWssSocksUpstream;
+                        editor.putBoolean("proxy_enabled", enabled);
                     } else {
-                        enabled = preferences.getBoolean("proxy_enabled", false);
+                        enabled = !saveForWssSocksUpstream && preferences.getBoolean("proxy_enabled", false);
+                        if (saveForWssSocksUpstream) {
+                            editor.putBoolean("proxy_enabled", false);
+                        }
                         SharedConfig.saveProxyList();
                     }
                     if (addingNewProxy || SharedConfig.currentProxy == currentProxyInfo) {
@@ -277,9 +300,16 @@ public class ProxySettingsActivity extends BaseFragment {
                         editor.putString("proxy_user", currentProxyInfo.username);
                         editor.putInt("proxy_port", currentProxyInfo.port);
                         editor.putString("proxy_secret", currentProxyInfo.secret);
-                        ConnectionsManager.setProxySettings(enabled, currentProxyInfo.address, currentProxyInfo.port, currentProxyInfo.username, currentProxyInfo.password, currentProxyInfo.secret);
+                        if (saveForWssSocksUpstream) {
+                            reapplyWssTransport = true;
+                        } else {
+                            ConnectionsManager.setProxySettings(enabled, currentProxyInfo.address, currentProxyInfo.port, currentProxyInfo.username, currentProxyInfo.password, currentProxyInfo.secret);
+                        }
                     }
                     editor.commit();
+                    if (reapplyWssTransport) {
+                        ConnectionsManager.setWssTransportSettings();
+                    }
 
                     NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.proxySettingsChanged);
 
@@ -321,6 +351,9 @@ public class ProxySettingsActivity extends BaseFragment {
             }
             linearLayout2.addView(typeCell[a], LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 50));
             typeCell[a].setOnClickListener(typeCellClickListener);
+            if (proxyTypeLocked && a != initialType) {
+                typeCell[a].setVisibility(View.GONE);
+            }
         }
 
         sectionCell[0] = new ShadowSectionCell(context);
@@ -729,6 +762,9 @@ public class ProxySettingsActivity extends BaseFragment {
             }
         }
 
+        if (proxyTypeLocked && pasteType != initialType) {
+            pasteType = -1;
+        }
         if (pasteType != -1) {
             if (pasteCell.getVisibility() != View.VISIBLE) {
                 pasteCell.setVisibility(View.VISIBLE);
@@ -783,6 +819,9 @@ public class ProxySettingsActivity extends BaseFragment {
     }
 
     private void setProxyType(int type, boolean animated, Runnable onTransitionEnd) {
+        if (proxyTypeLocked && type != initialType) {
+            type = initialType;
+        }
         if (currentType != type) {
             currentType = type;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {

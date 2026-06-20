@@ -68,10 +68,13 @@ def main() -> None:
     require("actionBar.setSubtitle(getString(R.string.WssTransportHeader)" in proxy_list and "ProxyCheckDiagnostics.headerStatusText" in proxy_list, "proxy UI header must show WSS status instead of legacy proxy status while WSS is selected")
     require("isWssSocks5TransportSelected()" in proxy_list and "isPlainSocksProxy" in proxy_list, "proxy UI must expose selected SOCKS5 proxies for SOCKS5 WSS without showing MTProxy entries")
     require("WssSocksUpstreamHeader" in proxy_list and "WssSocksUpstreamInfo" in proxy_list, "proxy UI must label the SOCKS5 list as WSS upstream, not as the legacy proxy mode")
+    require("ProxySettingsActivity.createWssSocksUpstream()" in proxy_list and "ProxySettingsActivity.createWssSocksUpstream(currentInfo)" in proxy_list, "adding or editing a WSS SOCKS5 upstream must open a SOCKS-only proxy editor")
 
     require("TYPE_WSS" in proxy_settings and "UseProxyWss" in proxy_settings, "proxy detail UI must offer WSS as a different proxy type")
     require("FIELD_WSS_PATH" in proxy_settings and "FIELD_WSS_HOST" in proxy_settings, "WSS detail UI must expose host/path separately from MTProxy secret")
     require("UseProxyWssInfo" in proxy_settings and "UseProxyTelegramInfoStealth" in proxy_settings, "WSS explanatory copy must be separate from MTProxy stealth copy")
+    require("createWssSocksUpstream()" in proxy_settings and "createWssSocksUpstream(SharedConfig.ProxyInfo proxyInfo)" in proxy_settings and "proxyTypeLocked" in proxy_settings and "saveAsWssSocksUpstream" in proxy_settings, "WSS SOCKS5 upstream editor must hide MTProxy choices and avoid enabling legacy proxy mode")
+    require("ConnectionsManager.setWssTransportSettings()" in proxy_settings and "ConnectionsManager.setProxySettings(enabled" in proxy_settings, "saving a WSS SOCKS5 upstream must reapply WSS without starting legacy proxy mode")
 
     require('native_setWssTransportSettings", "(IIILjava/lang/String;ILjava/lang/String;ZLjava/lang/String;ILjava/lang/String;Ljava/lang/String;ZZ)V"' in wrapper, "JNI signature must carry WSS gateway plus selected SOCKS5 upstream settings")
     require("void setWssTransportSettings" in manager_h and "wssTransportMode" in manager_h and "wssSocksHost" in manager_h, "native manager must store WSS transport and selected SOCKS5 upstream settings")
