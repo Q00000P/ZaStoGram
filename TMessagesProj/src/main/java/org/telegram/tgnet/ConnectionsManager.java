@@ -889,8 +889,12 @@ public class ConnectionsManager extends BaseController {
             boolean concreteDiagnostic = ProxyCheckDiagnostics.isLivePhase(normalizedDiagnostic)
                     || (ProxyCheckDiagnostics.isFailure(normalizedDiagnostic) && !ProxyCheckDiagnostics.UNKNOWN_FAIL.equals(normalizedDiagnostic));
             if (currentProxy != null && concreteDiagnostic) {
-                currentProxy.lastCheckDiagnostic = normalizedDiagnostic;
-                currentProxy.lastCheckDiagnosticTime = SystemClock.elapsedRealtime();
+                if (!ProxyCheckDiagnostics.shouldKeepFreshFailure(currentProxy, normalizedDiagnostic)) {
+                    currentProxy.lastCheckDiagnostic = normalizedDiagnostic;
+                    currentProxy.lastCheckDiagnosticTime = SystemClock.elapsedRealtime();
+                } else if (BuildVars.LOGS_ENABLED) {
+                    FileLog.d("proxy_connection_stage_held account=" + currentAccount + " phase=" + normalizedDiagnostic + " held_by=" + currentProxy.lastCheckDiagnostic);
+                }
             }
             if (BuildVars.LOGS_ENABLED) {
                 FileLog.d("proxy_connection_stage account=" + currentAccount + " phase=" + normalizedDiagnostic);

@@ -72,6 +72,7 @@ def main() -> None:
     require("disableLegacyProxyForWss" in proxy_list and "ConnectionsManager.setProxySettings(false" in proxy_list, "enabling WSS must disable the legacy proxy connection path so MTProxy cannot keep connecting")
     require("isWssTransportSelected()" in proxy_list and "useProxyRow = -1" in proxy_list and "mtProxySoftMuxRow = -1" in proxy_list, "proxy UI must hide legacy proxy toggles and MTProxy tuning while WSS transport is selected")
     require("if (wssTransportSelected)" in proxy_list and "isPlainSocksProxy" in proxy_list and "wss_socks_upstream" in proxy_list, "WSS UI must keep the SOCKS5 proxy list visible for every WSS mode while filtering out MTProxy entries")
+    require("SharedConfig.currentProxy == currentInfo && (useProxySettings || isWssTransportSelected())" in proxy_list, "WSS SOCKS selection status must not depend on legacy proxy_enabled")
     require("actionBar.setSubtitle(getString(R.string.WssTransportHeader)" in proxy_list and "ProxyCheckDiagnostics.headerStatusText" in proxy_list, "proxy UI header must show WSS status instead of legacy proxy status while WSS is selected")
     require("isWssTransportSelected()" in proxy_list and "isPlainSocksProxy" in proxy_list, "proxy UI must expose selected SOCKS5 proxies for every WSS mode without showing MTProxy entries")
     require("WssSocksUpstreamHeader" in proxy_list and "WssSocksUpstreamInfo" in proxy_list, "proxy UI must label the SOCKS5 list as WSS upstream, not as the legacy proxy mode")
@@ -102,6 +103,7 @@ def main() -> None:
     require("isCurrentTransportWss()" in socket_h and "currentWssTransport" in socket_h, "ConnectionSocket must own WSS state separately from MTProxy state")
     require("wss_startup" in socket_cpp and "currentWssTransport->connect" in socket_cpp and "currentWssTransport->sendFrame" in socket_cpp, "ConnectionSocket must route connect/write/read through WSS when selected")
     require("manager.wssSocksHost" in socket_cpp and "manager.wssSocksUsername" in socket_cpp and "manager.wssSocksPassword" in socket_cpp and "manager.wssSocksEnabled" in socket_cpp and "wss_startup connect_via_socks" in socket_cpp, "ConnectionSocket WSS route must pass and connect through selected SOCKS5 upstream settings")
+    require("fallback_to_socks" in socket_cpp and "currentSocksUsername = wssFallbackProxyUsername" in socket_cpp and "currentSocksPassword = wssFallbackProxyPassword" in socket_cpp, "official WSS without a stable DC relay must use the selected SOCKS fallback instead of silent direct TCP")
     require("wss_startup connect_start" in socket_cpp and "mtproxy_startup connect_start" in socket_cpp, "ConnectionSocket logs must not label WSS connects as MTProxy connects")
     require("forceProxyLikeInitForWss" in connection_cpp, "WSS mode must force the first MTProto init to carry dc_id without requiring an MTProxy secret")
 

@@ -9,6 +9,7 @@ public class ProxyCheckDiagnostics {
 
     private static final long LIVE_PHASE_STALE_MS = 45 * 1000L;
     private static final long FAILURE_PHASE_STALE_MS = 2 * 60 * 1000L;
+    private static final long FAILURE_HOLD_EARLY_RETRY_MS = 15 * 1000L;
 
     public static final String OK = "ok";
     public static final String CHECKING = "checking";
@@ -23,8 +24,11 @@ public class ProxyCheckDiagnostics {
     public static final String ON_CONNECTED = "on_connected";
     public static final String FIRST_TLS_APP_SENT = "first_tls_app_sent";
     public static final String FIRST_TLS_APP_RECV = "first_tls_app_recv";
+    public static final String FIRST_MTPROXY_PACKET_SENT = "first_mtproxy_packet_sent";
+    public static final String FIRST_MTPROXY_PACKET_RECV = "first_mtproxy_packet_recv";
     public static final String WAITING_TCP = "waiting_tcp";
     public static final String START_FAILED = "start_failed";
+    public static final String HOST_RESOLVE_FAILED = "host_resolve_failed";
     public static final String TCP_NOT_CONNECTED = "tcp_not_connected";
     public static final String TCP_CONNECTED_NO_PONG = "tcp_connected_no_pong";
     public static final String NETWORK_BLOCK_SUSPECTED = "network_block_suspected";
@@ -53,8 +57,11 @@ public class ProxyCheckDiagnostics {
             case ON_CONNECTED:
             case FIRST_TLS_APP_SENT:
             case FIRST_TLS_APP_RECV:
+            case FIRST_MTPROXY_PACKET_SENT:
+            case FIRST_MTPROXY_PACKET_RECV:
             case WAITING_TCP:
             case START_FAILED:
+            case HOST_RESOLVE_FAILED:
             case TCP_NOT_CONNECTED:
             case TCP_CONNECTED_NO_PONG:
             case NETWORK_BLOCK_SUSPECTED:
@@ -88,6 +95,20 @@ public class ProxyCheckDiagnostics {
             case ON_CONNECTED:
             case FIRST_TLS_APP_SENT:
             case FIRST_TLS_APP_RECV:
+            case FIRST_MTPROXY_PACKET_SENT:
+            case FIRST_MTPROXY_PACKET_RECV:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    public static boolean isEarlyRetryPhase(String diagnostic) {
+        switch (normalize(diagnostic)) {
+            case ADMISSION_QUEUE:
+            case HOST_RESOLVE_START:
+            case CONNECT_START:
+            case SOCKET_CONNECT_START:
                 return true;
             default:
                 return false;
@@ -106,6 +127,14 @@ public class ProxyCheckDiagnostics {
                 && proxyInfo.lastCheckDiagnosticTime != 0
                 && android.os.SystemClock.elapsedRealtime() - proxyInfo.lastCheckDiagnosticTime < FAILURE_PHASE_STALE_MS
                 && isFailure(proxyInfo.lastCheckDiagnostic);
+    }
+
+    public static boolean shouldKeepFreshFailure(SharedConfig.ProxyInfo proxyInfo, String incomingDiagnostic) {
+        return proxyInfo != null
+                && proxyInfo.lastCheckDiagnosticTime != 0
+                && android.os.SystemClock.elapsedRealtime() - proxyInfo.lastCheckDiagnosticTime < FAILURE_HOLD_EARLY_RETRY_MS
+                && isFailure(proxyInfo.lastCheckDiagnostic)
+                && isEarlyRetryPhase(incomingDiagnostic);
     }
 
     public static String statusText(SharedConfig.ProxyInfo proxyInfo, boolean currentProxyEnabled, int currentConnectionState) {
@@ -227,10 +256,16 @@ public class ProxyCheckDiagnostics {
                 return LocaleController.getString(R.string.ProxyStatusFirstDataSent);
             case FIRST_TLS_APP_RECV:
                 return LocaleController.getString(R.string.ProxyStatusFirstDataReceived);
+            case FIRST_MTPROXY_PACKET_SENT:
+                return LocaleController.getString(R.string.ProxyStatusFirstMtproxyPacketSent);
+            case FIRST_MTPROXY_PACKET_RECV:
+                return LocaleController.getString(R.string.ProxyStatusFirstMtproxyPacketReceived);
             case WAITING_TCP:
                 return LocaleController.getString(R.string.ProxyStatusWaitingTcp);
             case START_FAILED:
                 return LocaleController.getString(R.string.ProxyStatusStartFailed);
+            case HOST_RESOLVE_FAILED:
+                return LocaleController.getString(R.string.ProxyStatusHostResolveFailed);
             case TCP_NOT_CONNECTED:
                 return LocaleController.getString(R.string.ProxyStatusTcpNotConnected);
             case TCP_CONNECTED_NO_PONG:

@@ -237,7 +237,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
         }
 
         public void updateStatus() {
-            boolean currentProxyEnabled = SharedConfig.currentProxy == currentInfo && useProxySettings;
+            boolean currentProxyEnabled = SharedConfig.currentProxy == currentInfo && (useProxySettings || isWssTransportSelected());
             int colorKey = ProxyCheckDiagnostics.statusColorKey(currentInfo, currentProxyEnabled, currentConnectionState);
             valueTextView.setText(ProxyCheckDiagnostics.statusText(currentInfo, currentProxyEnabled, currentConnectionState));
             color = Theme.getColor(colorKey);
@@ -1081,7 +1081,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
     }
 
     private void markConnectedCurrentProxyIfNeeded() {
-        if (!useProxySettings || SharedConfig.currentProxy == null) {
+        if ((!useProxySettings && !isWssTransportSelected()) || SharedConfig.currentProxy == null) {
             return;
         }
         if (currentConnectionState == ConnectionsManager.ConnectionStateConnected || currentConnectionState == ConnectionsManager.ConnectionStateUpdating) {

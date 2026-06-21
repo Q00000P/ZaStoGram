@@ -54,6 +54,7 @@ SCHEDULER_APPLIED_RE = re.compile(r"time=([-0-9]+) applied_time=([-0-9]+) raw_ti
 TIME_RE = re.compile(r"^[0-9]{2}-[0-9]{2} ([0-9]{2}):([0-9]{2}):([0-9]{2})\.([0-9]{3})")
 
 FAKETLS_FAILURE_VERDICTS = {
+    "host_resolve_failed",
     "tcp_not_connected",
     "connected_but_client_hello_not_fully_sent",
     "client_hello_sent_no_server_hello",
@@ -205,6 +206,7 @@ class Attempt:
         event_map = {
             "connect_start": "connect_start",
             "host_resolve_start": "host_resolve_start",
+            "host_resolve_failed": "host_resolve_failed",
             "socket_connect_start": "socket_connect_start",
             "socket_connected": "socket_connected",
             "client_hello_send_progress": "client_hello_send_progress",
@@ -219,6 +221,8 @@ class Attempt:
             "on_connected": "on_connected",
             "first_tls_app_sent": "first_tls_app_sent",
             "first_tls_app_recv": "first_tls_app_recv",
+            "first_mtproxy_packet_sent": "first_mtproxy_packet_sent",
+            "first_mtproxy_packet_recv": "first_mtproxy_packet_recv",
             "tls_alert": "tls_alert",
             "recv_eof": "recv_eof",
             "EPOLLHUP": "epoll_hup",
@@ -236,6 +240,8 @@ class Attempt:
         has = self.events.__contains__
         if has("on_connected") and not has("socket_connected"):
             return "connected_without_socket_connected_marker"
+        if has("host_resolve_failed"):
+            return "host_resolve_failed"
         if not has("socket_connected"):
             return "tcp_not_connected"
         if not has("client_hello_sent"):
@@ -649,10 +655,15 @@ def print_plain_mtproxy_summary(attempts: list[Attempt]) -> None:
             attempt.connection_type or "unknown",
         )
         stats = by_flow[key]
+        stats["socket_connected"] += attempt.events["socket_connected"]
         stats["connected"] += 1 if attempt.events["on_connected"] or attempt.events["account_connected"] else 0
+        stats["first_packet_sent"] += attempt.events["first_mtproxy_packet_sent"]
+        stats["first_packet_recv"] += attempt.events["first_mtproxy_packet_recv"]
         stats["send"] += attempt.events["account_send_message"]
         stats["recv"] += attempt.events["account_received_message"]
         stats["rpc_result"] += attempt.events["account_rpc_result"]
+        stats["recv_eof"] += attempt.events["recv_eof"]
+        stats["socket_error"] += attempt.events["socket_error"]
         stats["invalid_packet_length"] += attempt.events["account_invalid_packet_length"]
         stats["auth_404"] += attempt.events["account_auth_404"]
         for event, count in attempt.events.items():
@@ -676,11 +687,18 @@ def print_plain_mtproxy_summary(attempts: list[Attempt]) -> None:
     )[:40]:
         parts = [
             f"{endpoint} {secret_kind} account{account} dc{dc} type{connection_type}:",
+            f"socket_connected={stats['socket_connected']}",
             f"connected={stats['connected']}",
+            f"first_packet_sent={stats['first_packet_sent']}",
+            f"first_packet_recv={stats['first_packet_recv']}",
             f"send={stats['send']}",
             f"recv={stats['recv']}",
             f"rpc_result={stats['rpc_result']}",
         ]
+        if stats["recv_eof"]:
+            parts.append(f"recv_eof={stats['recv_eof']}")
+        if stats["socket_error"]:
+            parts.append(f"socket_error={stats['socket_error']}")
         if stats["invalid_packet_length"]:
             parts.append(f"invalid_packet_length={stats['invalid_packet_length']}")
         if stats["auth_404"]:
@@ -997,10 +1015,15 @@ def write_csv_reports(attempts: list[Attempt], out_dir: Path) -> None:
             attempt.connection_type or "unknown",
         )
         stats = plain_rows[key]
+        stats["socket_connected"] += attempt.events["socket_connected"]
         stats["connected"] += 1 if attempt.events["on_connected"] or attempt.events["account_connected"] else 0
+        stats["first_packet_sent"] += attempt.events["first_mtproxy_packet_sent"]
+        stats["first_packet_recv"] += attempt.events["first_mtproxy_packet_recv"]
         stats["send"] += attempt.events["account_send_message"]
         stats["recv"] += attempt.events["account_received_message"]
         stats["rpc_result"] += attempt.events["account_rpc_result"]
+        stats["recv_eof"] += attempt.events["recv_eof"]
+        stats["socket_error"] += attempt.events["socket_error"]
         stats["invalid_packet_length"] += attempt.events["account_invalid_packet_length"]
         stats["auth_404"] += attempt.events["account_auth_404"]
         for event, count in attempt.events.items():
@@ -1015,10 +1038,15 @@ def write_csv_reports(attempts: list[Attempt], out_dir: Path) -> None:
             "account",
             "dc",
             "connection_type",
+            "socket_connected",
             "connected",
+            "first_packet_sent",
+            "first_packet_recv",
             "send",
             "recv",
             "rpc_result",
+            "recv_eof",
+            "socket_error",
             "invalid_packet_length",
             "auth_404",
             "disconnect_0",
@@ -1038,10 +1066,15 @@ def write_csv_reports(attempts: list[Attempt], out_dir: Path) -> None:
                     "account": account,
                     "dc": dc,
                     "connection_type": connection_type,
+                    "socket_connected": stats["socket_connected"],
                     "connected": stats["connected"],
+                    "first_packet_sent": stats["first_packet_sent"],
+                    "first_packet_recv": stats["first_packet_recv"],
                     "send": stats["send"],
                     "recv": stats["recv"],
                     "rpc_result": stats["rpc_result"],
+                    "recv_eof": stats["recv_eof"],
+                    "socket_error": stats["socket_error"],
                     "invalid_packet_length": stats["invalid_packet_length"],
                     "auth_404": stats["auth_404"],
                     "disconnect_0": stats["disconnect_0"],
@@ -1108,6 +1141,7 @@ def print_report(attempts: list[Attempt], global_lines: list[str]) -> None:
     print()
     print("How to read the verdicts:")
     print("- tcp_not_connected: TCP/connect/IP/proxy availability layer.")
+    print("- host_resolve_failed: proxy hostname did not resolve; compare DNS/VPN and sslip.io fast-path before blaming JA4.")
     print("- connected_without_socket_connected_marker: Telegram reached on_connected, but this log slice has no socket_connected marker; do not treat it as a TCP failure.")
     print("- client_hello_sent_no_server_hello: compare VPN vs non-VPN; with VPN failure points to server/client compatibility, without VPN it can be DPI blackhole.")
     print("- server_hello_hmac_mismatch: likely ClientHello/profile/server response mismatch, not plain packet loss.")

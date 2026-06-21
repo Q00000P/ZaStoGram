@@ -108,9 +108,12 @@ def main():
             "logcat.txt:28: 06-20 15:00:02.050 connection(0x3) mtproxy_startup connect_start proxy_state=0 "
             "secret_kind=dd is_faketls=0 domain_len=0 profile=android_chrome address=149.154.167.51 port=443\n"
         )
+        handle.write("logcat.txt:28: connection(0x3) mtproxy_startup socket_connected state=0 tls=0 secret_kind=dd\n")
         handle.write("logcat.txt:29: connection(0x3) mtproxy_startup on_connected tls=0\n")
-        handle.write("logcat.txt:30: connection(0x3, account0, dc2, type 1) send message invokeWithLayer\n")
-        handle.write("logcat.txt:31: connection(0x3, account0, dc2, type 1) received message len 98\n")
+        handle.write("logcat.txt:30: connection(0x3) mtproxy_startup first_mtproxy_packet_sent bytes=128 secret_kind=dd\n")
+        handle.write("logcat.txt:31: connection(0x3, account0, dc2, type 1) send message invokeWithLayer\n")
+        handle.write("logcat.txt:32: connection(0x3) mtproxy_startup first_mtproxy_packet_recv bytes=98 secret_kind=dd\n")
+        handle.write("logcat.txt:33: connection(0x3, account0, dc2, type 1) received message len 98\n")
         handle.write("logcat.txt:32: connection(0x3, account0, dc2, type 1) received object TL_rpc_result\n")
         handle.write("logcat.txt:33: connection(0x3, account0, dc2, type 1) received rpc_result with TL_boolTrue\n")
         handle.write(
@@ -125,8 +128,10 @@ def main():
             "logcat.txt:36: 06-20 15:00:03.050 connection(0x4) mtproxy_startup connect_start proxy_state=0 "
             "secret_kind=dd is_faketls=0 domain_len=0 profile=android_chrome address=149.154.167.51 port=443\n"
         )
+        handle.write("logcat.txt:36: connection(0x4) mtproxy_startup socket_connected state=0 tls=0 secret_kind=dd\n")
         handle.write("logcat.txt:37: connection(0x4) mtproxy_startup on_connected tls=0\n")
-        handle.write("logcat.txt:38: connection(0x4, account0, dc2, type 2) send message getFile\n")
+        handle.write("logcat.txt:38: connection(0x4) mtproxy_startup first_mtproxy_packet_sent bytes=96 secret_kind=dd\n")
+        handle.write("logcat.txt:39: connection(0x4, account0, dc2, type 2) send message getFile\n")
         handle.write("logcat.txt:39: connection(0x4, account0, dc2, type 2) reset auth key due to -404 error\n")
         handle.write("logcat.txt:40: connection(0x4, account0, dc2, type 2) received invalid packet length\n")
         handle.write("logcat.txt:41: connection(0x4, account0, dc2, type 2) disconnected with reason 2\n")
@@ -206,11 +211,11 @@ def main():
         "analyzer must summarize non-FakeTLS MTProxy traffic separately from FakeTLS",
     )
     require(
-        "plain.example:443 dd account0 dc2 type1: connected=1 send=1 recv=1 rpc_result=1" in result.stdout,
+        "plain.example:443 dd account0 dc2 type1: socket_connected=1 connected=1 first_packet_sent=1 first_packet_recv=1 send=1 recv=1 rpc_result=1" in result.stdout,
         "plain MTProxy summary must show successful account/dc/type traffic",
     )
     require(
-        "plain.example:443 dd account0 dc2 type2: connected=1 send=1 recv=0 rpc_result=0 invalid_packet_length=1 auth_404=1 disconnect_2=1" in result.stdout,
+        "plain.example:443 dd account0 dc2 type2: socket_connected=1 connected=1 first_packet_sent=1 first_packet_recv=0 send=1 recv=0 rpc_result=0 invalid_packet_length=1 auth_404=1 disconnect_2=1" in result.stdout,
         "plain MTProxy summary must expose broken download/media lifecycle separately",
     )
     require(

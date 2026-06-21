@@ -32,6 +32,8 @@ LIVE_PHASES = [
     "on_connected",
     "first_tls_app_sent",
     "first_tls_app_recv",
+    "first_mtproxy_packet_sent",
+    "first_mtproxy_packet_recv",
 ]
 
 
@@ -98,6 +100,12 @@ def main() -> None:
         "current proxy stage callback must accept concrete failure phases while rejecting unknown_fail noise",
     )
     require(
+        "shouldKeepFreshFailure" in diagnostics
+        and "isEarlyRetryPhase" in diagnostics
+        and "ProxyCheckDiagnostics.shouldKeepFreshFailure(currentProxy, normalizedDiagnostic)" in text("connections_java"),
+        "fresh terminal failures must not be overwritten by early retry phases such as admission_queue or host_resolve_start",
+    )
+    require(
         "proxyConnectionStageChanged" in text("notification_center")
         and "onProxyConnectionStageChanged" in text("connections_java")
         and "NotificationCenter.proxyConnectionStageChanged" in text("connections_java"),
@@ -112,13 +120,20 @@ def main() -> None:
     require(
         "publishProxyConnectionStage" in text("socket_h")
         and "publishProxyConnectionStage(" in text("socket")
+        and "isCurrentMtProxyConnection()" in text("socket_h")
+        and "markMtProxyFirstPlainDataSent" in text("socket_h")
+        and "markMtProxyFirstPlainDataReceived" in text("socket_h")
+        and "void ConnectionSocket::markMtProxyFirstPlainDataSent" in text("socket")
+        and "void ConnectionSocket::markMtProxyFirstPlainDataReceived" in text("socket")
+        and "!isCurrentMtProxyConnection()" in text("socket")
         and "!overrideProxyAddress.empty()" in text("socket")
         and 'publishProxyConnectionStage("host_resolve_start")' in text("socket")
+        and 'proxyCheckDiagnostic = "host_resolve_failed"' in text("socket")
         and 'publishProxyConnectionStage("client_hello_sent")' in text("socket")
         and 'publishProxyConnectionStage("admission_hold_after_client_hello_failure")' in text("socket")
         and 'publishProxyConnectionStage("server_hello_hmac_ok")' in text("socket")
         and 'publishProxyConnectionStage("first_tls_app_recv")' in text("socket"),
-        "ConnectionSocket must publish live stages at the same boundaries it logs",
+        "ConnectionSocket must publish live stages for plain dd/legacy MTProxy too, not only FakeTLS ee",
     )
     require(
         "publishProxyConnectionStage(proxyCheckDiagnostic.c_str())" in text("socket"),
@@ -139,6 +154,7 @@ def main() -> None:
         for string_name in (
             "ProxyStatusAdmissionQueue",
             "ProxyStatusHostResolve",
+            "ProxyStatusHostResolveFailed",
             "ProxyStatusTcpConnecting",
             "ProxyStatusTcpConnected",
             "ProxyStatusClientHelloSent",
@@ -147,6 +163,8 @@ def main() -> None:
             "ProxyStatusMtprotoStarting",
             "ProxyStatusFirstDataSent",
             "ProxyStatusFirstDataReceived",
+            "ProxyStatusFirstMtproxyPacketSent",
+            "ProxyStatusFirstMtproxyPacketReceived",
         ):
             require(f'name="{string_name}"' in source, f"{name} must define {string_name}")
 

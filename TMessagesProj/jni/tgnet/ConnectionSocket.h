@@ -33,6 +33,7 @@ public:
     void setTimeout(time_t timeout);
     time_t getTimeout();
     bool isDisconnected();
+    bool isCurrentMtProxyConnection();
     void dropConnection();
     void setOverrideProxy(std::string address, uint16_t port, std::string username, std::string password, std::string secret, int32_t mtProxyTlsProfile, int32_t mtProxyClientHelloFragmentation, int32_t mtProxyConnectionPatternMode, int32_t mtProxyRecordSizingMode, int32_t mtProxyTimingMode, int32_t mtProxyStartupCoverMode);
     void onHostNameResolved(std::string host, std::string ip, bool ipv6);
@@ -45,6 +46,9 @@ protected:
     bool checkTimeout(int64_t now);
     void resetLastEventTime();
     bool hasTlsHashMismatch();
+    void publishProxyConnectionStage(const char *diagnostic);
+    void markMtProxyFirstPlainDataSent(uint32_t bytes);
+    void markMtProxyFirstPlainDataReceived(uint32_t bytes);
     virtual void onReceivedData(NativeByteBuffer *buffer) = 0;
     virtual void onDisconnected(int32_t reason, int32_t error) = 0;
     virtual void onConnected() = 0;
@@ -76,6 +80,8 @@ private:
     bool isIpv6;
     std::string currentAddress;
     uint16_t currentPort;
+    std::string currentSocksUsername;
+    std::string currentSocksPassword;
 
     std::string waitingForHostResolve;
     bool adjustWriteOpAfterResolve;
@@ -121,6 +127,8 @@ private:
     int8_t tlsState = 0;
     bool mtproxyFirstTlsFrameSentLogged = false;
     bool mtproxyFirstTlsDataReceivedLogged = false;
+    bool mtproxyFirstPlainDataSentLogged = false;
+    bool mtproxyFirstPlainDataReceivedLogged = false;
     bool currentTransportWss = false;
     int32_t currentDatacenterId = 0;
     bool currentMediaConnection = false;
@@ -145,7 +153,6 @@ private:
     void closeSocket(int32_t reason, int32_t error);
     void openConnectionInternal(bool ipv6);
     void adjustWriteOp();
-    void publishProxyConnectionStage(const char *diagnostic);
     bool isCurrentTransportWss();
     bool dispatchWssPayloads(std::vector<std::vector<uint8_t>> &payloads);
     bool scheduleProxyHandshakeAdmissionIfNeeded(bool ipv6, int32_t timerMode);

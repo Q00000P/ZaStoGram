@@ -2084,6 +2084,8 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
     isIpv6 = ipv6;
     currentAddress = address;
     currentPort = port;
+    currentSocksUsername.clear();
+    currentSocksPassword.clear();
     waitingForHostResolve = "";
     adjustWriteOpAfterResolve = false;
     currentSecret = "";
@@ -2114,6 +2116,8 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
     mtproxySocketConnectedLogged = false;
     mtproxyFirstTlsFrameSentLogged = false;
     mtproxyFirstTlsDataReceivedLogged = false;
+    mtproxyFirstPlainDataSentLogged = false;
+    mtproxyFirstPlainDataReceivedLogged = false;
     ConnectionsManager::getInstance(instanceNum).attachConnection(this);
 
     memset(&socketAddress, 0, sizeof(sockaddr_in));
@@ -2128,6 +2132,11 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
     int32_t proxyRecordSizingMode = overrideProxyRecordSizingMode;
     int32_t proxyTimingMode = overrideProxyTimingMode;
     int32_t proxyStartupCoverMode = overrideProxyStartupCoverMode;
+    std::string wssFallbackProxyAddress;
+    std::string wssFallbackProxyUsername;
+    std::string wssFallbackProxyPassword;
+    std::string wssFallbackProxySecret;
+    uint16_t wssFallbackProxyPort = 1080;
     if (proxyAddress->empty()) {
         proxyAddress = &ConnectionsManager::getInstance(instanceNum).proxyAddress;
         proxyPort = ConnectionsManager::getInstance(instanceNum).proxyPort;
@@ -2150,7 +2159,18 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
             selectedWssRoute = WssTransport::officialRouteFor(datacenterId, mediaConnection);
             if (selectedWssRoute.mode == WssTransport::WSS_TRANSPORT_OFF) {
                 shouldUseWss = false;
-                if (LOGS_ENABLED) DEBUG_D("connection(%p) wss_startup dc%d has no stable official route, fallback to TCP", this, datacenterId);
+                if (manager.wssSocksEnabled && !manager.wssSocksHost.empty()) {
+                    wssFallbackProxyAddress = manager.wssSocksHost;
+                    wssFallbackProxyPort = manager.wssSocksPort == 0 ? 1080 : manager.wssSocksPort;
+                    wssFallbackProxyUsername = manager.wssSocksUsername;
+                    wssFallbackProxyPassword = manager.wssSocksPassword;
+                    proxyAddress = &wssFallbackProxyAddress;
+                    proxyPort = wssFallbackProxyPort;
+                    proxySecret = &wssFallbackProxySecret;
+                    if (LOGS_ENABLED) DEBUG_D("connection(%p) wss_startup dc%d has no stable official route, fallback_to_socks socks=%s:%u", this, datacenterId, wssFallbackProxyAddress.c_str(), (uint32_t) wssFallbackProxyPort);
+                } else {
+                    if (LOGS_ENABLED) DEBUG_D("connection(%p) wss_startup dc%d has no stable official route, fallback to TCP", this, datacenterId);
+                }
             }
         } else {
             selectedWssRoute = WssTransport::customRoute(
@@ -2222,6 +2242,7 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
 #else
             struct hostent *he;
             if ((he = gethostbyname(wssConnectHost.c_str())) == nullptr) {
+                proxyCheckDiagnostic = "host_resolve_failed";
                 if (LOGS_ENABLED) DEBUG_E("connection(%p) can't resolve WSS host %s address", this, wssConnectHost.c_str());
                 closeSocket(1, -1);
                 return;
@@ -2231,6 +2252,7 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
                 socketAddress.sin_addr.s_addr = addr_list[0]->s_addr;
                 ipv6 = false;
             } else {
+                proxyCheckDiagnostic = "host_resolve_failed";
                 closeSocket(1, -1);
                 return;
             }
@@ -2248,6 +2270,20 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
         if (proxySecret->empty()) {
             proxyAuthState = 1;
             tempBuffLength = 1024;
+            if (!wssFallbackProxyAddress.empty()) {
+                currentAddress = address;
+                currentPort = port;
+                currentSocksUsername = wssFallbackProxyUsername;
+                currentSocksPassword = wssFallbackProxyPassword;
+                currentSecret = "";
+                currentSecretDomain = "";
+            } else if (!overrideProxyAddress.empty()) {
+                currentSocksUsername = overrideProxyUser;
+                currentSocksPassword = overrideProxyPassword;
+            } else {
+                currentSocksUsername = ConnectionsManager::getInstance(instanceNum).proxyUser;
+                currentSocksPassword = ConnectionsManager::getInstance(instanceNum).proxyPassword;
+            }
         } else if (proxySecret->size() > 17 && (*proxySecret)[0] == '\xee') {
             proxyAuthState = 10;
             currentSecret = proxySecret->substr(1, 16);
@@ -2312,6 +2348,7 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
 #else
                 struct hostent *he;
                 if ((he = gethostbyname(proxyAddress->c_str())) == nullptr) {
+                    proxyCheckDiagnostic = "host_resolve_failed";
                     if (LOGS_ENABLED) DEBUG_E("connection(%p) can't resolve host %s address", this, proxyAddress->c_str());
                     closeSocket(1, -1);
                     return;
@@ -2322,6 +2359,7 @@ void ConnectionSocket::openConnection(std::string address, uint16_t port, std::s
                     if (LOGS_ENABLED) DEBUG_D("connection(%p) resolved host %s address %x", this, proxyAddress->c_str(), addr_list[0]->s_addr);
                     ipv6 = false;
                 } else {
+                    proxyCheckDiagnostic = "host_resolve_failed";
                     if (LOGS_ENABLED) DEBUG_E("connection(%p) can't resolve host %s address", this, proxyAddress->c_str());
                     closeSocket(1, -1);
                     return;
@@ -2458,6 +2496,13 @@ bool ConnectionSocket::isCurrentTransportWss() {
     return currentTransportWss && currentWssRoute.mode != WssTransport::WSS_TRANSPORT_OFF;
 }
 
+bool ConnectionSocket::isCurrentMtProxyConnection() {
+    return currentSecretKind != nullptr
+           && strcmp(currentSecretKind, "none") != 0
+           && strcmp(currentSecretKind, "socks") != 0
+           && strcmp(currentSecretKind, "wss") != 0;
+}
+
 bool ConnectionSocket::dispatchWssPayloads(std::vector<std::vector<uint8_t>> &payloads) {
     for (auto &payload : payloads) {
         if (payload.empty()) {
@@ -2478,13 +2523,33 @@ bool ConnectionSocket::dispatchWssPayloads(std::vector<std::vector<uint8_t>> &pa
 }
 
 void ConnectionSocket::publishProxyConnectionStage(const char *diagnostic) {
-    if (!currentSecretIsFakeTls || !overrideProxyAddress.empty() || diagnostic == nullptr) {
+    if (!isCurrentMtProxyConnection() || !overrideProxyAddress.empty() || diagnostic == nullptr) {
         return;
     }
     ConnectionsManager &manager = ConnectionsManager::getInstance(instanceNum);
     if (manager.delegate != nullptr) {
         manager.delegate->onProxyConnectionStageChanged(instanceNum, diagnostic);
     }
+}
+
+void ConnectionSocket::markMtProxyFirstPlainDataSent(uint32_t bytes) {
+    if (!isCurrentMtProxyConnection() || currentSecretIsFakeTls || bytes == 0 || mtproxyFirstPlainDataSentLogged) {
+        return;
+    }
+    mtproxyFirstPlainDataSentLogged = true;
+    proxyCheckDiagnostic = "post_handshake_no_appdata";
+    publishProxyConnectionStage("first_mtproxy_packet_sent");
+    if (LOGS_ENABLED) DEBUG_D("connection(%p) mtproxy_startup first_mtproxy_packet_sent bytes=%u secret_kind=%s", this, bytes, currentSecretKind);
+}
+
+void ConnectionSocket::markMtProxyFirstPlainDataReceived(uint32_t bytes) {
+    if (!isCurrentMtProxyConnection() || currentSecretIsFakeTls || bytes == 0 || mtproxyFirstPlainDataReceivedLogged) {
+        return;
+    }
+    mtproxyFirstPlainDataReceivedLogged = true;
+    proxyCheckDiagnostic = "dropped_after_appdata";
+    publishProxyConnectionStage("first_mtproxy_packet_recv");
+    if (LOGS_ENABLED) DEBUG_D("connection(%p) mtproxy_startup first_mtproxy_packet_recv bytes=%u secret_kind=%s", this, bytes, currentSecretKind);
 }
 
 void ConnectionSocket::rotateMtProxyTlsProfileOnFailureIfNeeded(int32_t reason, int32_t error) {
@@ -2502,9 +2567,9 @@ void ConnectionSocket::rotateMtProxyTlsProfileOnFailureIfNeeded(int32_t reason, 
 
 void ConnectionSocket::closeSocket(int32_t reason, int32_t error) {
     lastEventTime = ConnectionsManager::getInstance(instanceNum).getCurrentTimeMonotonicMillis();
-    if (LOGS_ENABLED) DEBUG_D("connection(%p) mtproxy_disconnect reason=%d reason_text=%s error=%d error_text=%s secret_kind=%s is_faketls=%d is_wss=%d proxy_state=%d tls_state=%d bytes_read=%zu pending_hello=%u/%u pending=%u/%u first_tls_sent=%d first_tls_recv=%d", this, reason, mtProxyDisconnectReasonName(reason), error, mtProxySocketErrorName(error), currentSecretKind, currentSecretIsFakeTls ? 1 : 0, currentTransportWss ? 1 : 0, (int) proxyAuthState, (int) tlsState, bytesRead, pendingClientHelloOffset, pendingClientHelloSize, pendingTlsFrameOffset, pendingTlsFrameSize, mtproxyFirstTlsFrameSentLogged ? 1 : 0, mtproxyFirstTlsDataReceivedLogged ? 1 : 0);
+    if (LOGS_ENABLED) DEBUG_D("connection(%p) mtproxy_disconnect reason=%d reason_text=%s error=%d error_text=%s secret_kind=%s is_faketls=%d is_wss=%d proxy_state=%d tls_state=%d bytes_read=%zu pending_hello=%u/%u pending=%u/%u first_tls_sent=%d first_tls_recv=%d first_plain_sent=%d first_plain_recv=%d", this, reason, mtProxyDisconnectReasonName(reason), error, mtProxySocketErrorName(error), currentSecretKind, currentSecretIsFakeTls ? 1 : 0, currentTransportWss ? 1 : 0, (int) proxyAuthState, (int) tlsState, bytesRead, pendingClientHelloOffset, pendingClientHelloSize, pendingTlsFrameOffset, pendingTlsFrameSize, mtproxyFirstTlsFrameSentLogged ? 1 : 0, mtproxyFirstTlsDataReceivedLogged ? 1 : 0, mtproxyFirstPlainDataSentLogged ? 1 : 0, mtproxyFirstPlainDataReceivedLogged ? 1 : 0);
     rotateMtProxyTlsProfileOnFailureIfNeeded(reason, error);
-    if (reason != 0 && currentSecretIsFakeTls && !proxyCheckDiagnostic.empty()) {
+    if (reason != 0 && isCurrentMtProxyConnection() && !proxyCheckDiagnostic.empty()) {
         publishProxyConnectionStage(proxyCheckDiagnostic.c_str());
     }
     releaseProxyHandshakeAdmission(false, "closeSocket");
@@ -2522,6 +2587,8 @@ void ConnectionSocket::closeSocket(int32_t reason, int32_t error) {
     currentTransportWss = false;
     currentWssTransport.reset();
     currentWssRoute = WssRouteConfig();
+    currentSocksUsername.clear();
+    currentSocksPassword.clear();
     proxyAuthState = 0;
     tlsState = 0;
     onConnectedSent = false;
@@ -2916,6 +2983,7 @@ void ConnectionSocket::onEvent(uint32_t events) {
                                 }
                             }
                         } else {
+                            markMtProxyFirstPlainDataReceived((uint32_t) readCount);
                             onReceivedData(buffer);
                         }
                     }
@@ -2936,11 +3004,11 @@ void ConnectionSocket::onEvent(uint32_t events) {
             closeSocket(1, error);
             return;
         } else {
-            if (!mtproxySocketConnectedLogged && (proxyAuthState >= 10 || tlsState != 0)) {
+            if (!mtproxySocketConnectedLogged && isCurrentMtProxyConnection()) {
                 mtproxySocketConnectedLogged = true;
                 proxyCheckDiagnostic = "tcp_connected_no_pong";
                 publishProxyConnectionStage("socket_connected");
-                if (LOGS_ENABLED) DEBUG_D("connection(%p) mtproxy_startup socket_connected state=%d tls=%d", this, (int) proxyAuthState, (int) tlsState);
+                if (LOGS_ENABLED) DEBUG_D("connection(%p) mtproxy_startup socket_connected state=%d tls=%d secret_kind=%s", this, (int) proxyAuthState, (int) tlsState, currentSecretKind);
             }
             if (proxyAuthState != 0) {
                 if (proxyAuthState >= 10) {
@@ -3007,21 +3075,12 @@ void ConnectionSocket::onEvent(uint32_t events) {
                         adjustWriteOp();
                     } else if (proxyAuthState == 3) {
                         tempBuffer->bytes[0] = 0x01;
-                        std::string *proxyUser;
-                        std::string *proxyPassword;
-                        if (!overrideProxyAddress.empty()) {
-                            proxyUser = &overrideProxyUser;
-                            proxyPassword = &overrideProxyPassword;
-                        } else {
-                            proxyUser = &ConnectionsManager::getInstance(instanceNum).proxyUser;
-                            proxyPassword = &ConnectionsManager::getInstance(instanceNum).proxyPassword;
-                        }
-                        uint8_t len1 = (uint8_t) proxyUser->length();
-                        uint8_t len2 = (uint8_t) proxyPassword->length();
+                        uint8_t len1 = (uint8_t) currentSocksUsername.length();
+                        uint8_t len2 = (uint8_t) currentSocksPassword.length();
                         tempBuffer->bytes[1] = len1;
-                        memcpy(tempBuffer->bytes + 2, proxyUser->c_str(), len1);
+                        memcpy(tempBuffer->bytes + 2, currentSocksUsername.c_str(), len1);
                         tempBuffer->bytes[2 + len1] = len2;
-                        memcpy(tempBuffer->bytes + 3 + len1, proxyPassword->c_str(), len2);
+                        memcpy(tempBuffer->bytes + 3 + len1, currentSocksPassword.c_str(), len2);
                         proxyAuthState = 4;
                         if (send(socketFd, tempBuffer->bytes, 3 + len1 + len2, 0) < 0) {
                             if (LOGS_ENABLED) DEBUG_E("connection(%p) send failed", this);
@@ -3089,6 +3148,7 @@ void ConnectionSocket::onEvent(uint32_t events) {
                             if (ConnectionsManager::getInstance(instanceNum).delegate != nullptr) {
                                 ConnectionsManager::getInstance(instanceNum).delegate->onBytesSent((int32_t) sentLength, currentNetworkType, instanceNum);
                             }
+                            markMtProxyFirstPlainDataSent((uint32_t) sentLength);
                             outgoingByteStream->discard((uint32_t) sentLength);
                             adjustWriteOp();
                         }
@@ -3210,6 +3270,8 @@ void ConnectionSocket::requestPendingHostResolve() {
     }
     ConnectionsManager &manager = ConnectionsManager::getInstance(instanceNum);
     if (manager.delegate == nullptr) {
+        proxyCheckDiagnostic = "host_resolve_failed";
+        if (LOGS_ENABLED) DEBUG_D("connection(%p) mtproxy_startup host_resolve_failed host=%s reason=no_delegate", this, waitingForHostResolve.c_str());
         closeSocket(1, -1);
         return;
     }
@@ -3225,6 +3287,9 @@ void ConnectionSocket::onHostNameResolved(std::string host, std::string ip, bool
         if (waitingForHostResolve == host) {
             waitingForHostResolve = "";
             if (ip.empty() || inet_pton(AF_INET, ip.c_str(), &socketAddress.sin_addr.s_addr) != 1) {
+                proxyCheckDiagnostic = "host_resolve_failed";
+                publishProxyConnectionStage(proxyCheckDiagnostic.c_str());
+                if (LOGS_ENABLED) DEBUG_D("connection(%p) mtproxy_startup host_resolve_failed host=%s ip=%s", this, host.c_str(), ip.c_str());
                 if (LOGS_ENABLED) DEBUG_E("connection(%p) can't resolve host %s address via delegate", this, host.c_str());
                 closeSocket(1, -1);
                 return;

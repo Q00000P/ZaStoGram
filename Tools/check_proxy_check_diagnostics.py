@@ -26,6 +26,7 @@ REQUIRED_PHASES = [
     "ok",
     "checking",
     "start_failed",
+    "host_resolve_failed",
     "tcp_not_connected",
     "tcp_connected_no_pong",
     "client_hello_sent_no_server_hello",
@@ -96,7 +97,9 @@ def main():
         "localized GUI strings must describe tcp_connected_no_pong clearly",
     )
     require(
-        "tcp_connected_no_pong" in text("analyzer") and "client_hello_sent_no_server_hello" in text("analyzer"),
+        "host_resolve_failed" in text("analyzer")
+        and "tcp_connected_no_pong" in text("analyzer")
+        and "client_hello_sent_no_server_hello" in text("analyzer"),
         "log analyzer must use the same diagnostic phase names as the GUI",
     )
     require("-1001" not in combined and "-1002" not in combined, "diagnostics must not use magic negative IDs")
