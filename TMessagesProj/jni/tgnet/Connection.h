@@ -98,6 +98,8 @@ private:
     bool waitForReconnectTimer = false;
     bool connectionInProcess = false;
     uint32_t lastReconnectTimeout = 100;
+    uint32_t mtProxyReconnectBackoffMs = 0;
+    int64_t mtProxyReconnectHoldUntil = 0;
     int64_t usefullDataReceiveTime;
     uint32_t currentTimeout = 4;
     uint32_t receivedDataAmount = 0;

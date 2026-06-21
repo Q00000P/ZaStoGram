@@ -9,6 +9,8 @@ PROXY_LIST = ROOT / "TMessagesProj/src/main/java/org/telegram/ui/ProxyListActivi
 SHARED_CONFIG = ROOT / "TMessagesProj/src/main/java/org/telegram/messenger/SharedConfig.java"
 SOCKET_CPP = ROOT / "TMessagesProj/jni/tgnet/ConnectionSocket.cpp"
 SOCKET_H = ROOT / "TMessagesProj/jni/tgnet/ConnectionSocket.h"
+CONNECTION_CPP = ROOT / "TMessagesProj/jni/tgnet/Connection.cpp"
+CONNECTION_H = ROOT / "TMessagesProj/jni/tgnet/Connection.h"
 MANAGER_CPP = ROOT / "TMessagesProj/jni/tgnet/ConnectionsManager.cpp"
 MANAGER_H = ROOT / "TMessagesProj/jni/tgnet/ConnectionsManager.h"
 PROXY_CHECK = ROOT / "TMessagesProj/jni/tgnet/ProxyCheckInfo.h"
@@ -32,6 +34,8 @@ def main() -> None:
     shared_config = text(SHARED_CONFIG)
     socket_cpp = text(SOCKET_CPP)
     socket_h = text(SOCKET_H)
+    connection_cpp = text(CONNECTION_CPP)
+    connection_h = text(CONNECTION_H)
     manager_cpp = text(MANAGER_CPP)
     manager_h = text(MANAGER_H)
     proxy_check = text(PROXY_CHECK)
@@ -184,6 +188,18 @@ def main() -> None:
         and "proxyHandshakeAdmissionKey.clear();" in socket_cpp
         and "if (hadAdmission && !suppressQueuedGrant && mtProxyConnectionPatternUsesAdmission(connectionPatternMode))" in socket_cpp,
         "admission release must be idempotent so post-handshake close/suspend cannot dequeue a second queued request",
+    )
+    require(
+        "mtProxyDiagnosticNeedsReconnectBackoff" in connection_cpp
+        and "client_hello_sent_no_server_hello" in connection_cpp
+        and "server_hello_hmac_mismatch" in connection_cpp
+        and "mtproxy_startup reconnect_backoff" in connection_cpp
+        and "mtproxy_startup reconnect_hold" in connection_cpp
+        and "getProxyCheckDiagnostic()" in connection_cpp
+        and "connectionState == TcpConnectionStageIdle && connectionType != ConnectionTypeProxy && mtProxyDiagnosticNeedsReconnectBackoff" in connection_cpp
+        and "mtProxyReconnectBackoffMs" in connection_h
+        and "mtProxyReconnectHoldUntil" in connection_h,
+        "Connection layer must back off FakeTLS post-ClientHello reconnects instead of restarting generic/media every second",
     )
     host_timer_index = socket_cpp.find("if (mode == MT_PROXY_HANDSHAKE_TIMER_HOST_RESOLVE)")
     host_request_index = socket_cpp.find("requestPendingHostResolve();", host_timer_index)

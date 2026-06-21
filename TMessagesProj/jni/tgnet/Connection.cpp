@@ -42,6 +42,65 @@ static int32_t mtProxyHandshakePriorityForConnectionType(ConnectionType type) {
     }
 }
 
+static bool mtProxyDiagnosticNeedsReconnectBackoff(const char *diagnostic) {
+    if (diagnostic == nullptr) {
+        return false;
+    }
+    return strcmp(diagnostic, "client_hello_sent_no_server_hello") == 0 ||
+           strcmp(diagnostic, "server_hello_hmac_mismatch") == 0 ||
+           strcmp(diagnostic, "post_handshake_no_appdata") == 0;
+}
+
+static uint32_t mtProxyReconnectBackoffBaseMs(ConnectionType type) {
+    switch ((int32_t) type & 0x0000ffff) {
+        case ConnectionTypeGeneric:
+        case ConnectionTypeTemp:
+            return 3000;
+        case ConnectionTypeGenericMedia:
+        case ConnectionTypePush:
+            return 5000;
+        case ConnectionTypeDownload:
+        case ConnectionTypeUpload:
+            return 8000;
+        default:
+            return 5000;
+    }
+}
+
+static uint32_t mtProxyReconnectBackoffMaxMs(ConnectionType type) {
+    switch ((int32_t) type & 0x0000ffff) {
+        case ConnectionTypeGeneric:
+        case ConnectionTypeTemp:
+            return 15000;
+        case ConnectionTypeGenericMedia:
+        case ConnectionTypePush:
+            return 20000;
+        case ConnectionTypeDownload:
+        case ConnectionTypeUpload:
+            return 30000;
+        default:
+            return 20000;
+    }
+}
+
+static uint32_t mtProxyReconnectJitterMs(uint32_t limit) {
+    if (limit == 0) {
+        return 0;
+    }
+    uint32_t value = 0;
+    RAND_bytes(reinterpret_cast<uint8_t *>(&value), sizeof(value));
+    return value % (limit + 1);
+}
+
+static uint32_t mtProxyNextReconnectBackoffMs(ConnectionType type, uint32_t previousDelayMs) {
+    uint32_t base = mtProxyReconnectBackoffBaseMs(type);
+    uint32_t maxDelay = mtProxyReconnectBackoffMaxMs(type);
+    uint32_t delay = previousDelayMs == 0 ? base : std::min(previousDelayMs * 2, maxDelay);
+    delay = std::max(delay, base);
+    delay = std::min(delay, maxDelay);
+    return delay + mtProxyReconnectJitterMs(std::min(delay / 4, 2000U));
+}
+
 Connection::Connection(Datacenter *datacenter, ConnectionType type, int8_t num) : ConnectionSession(datacenter->instanceNum), ConnectionSocket(datacenter->instanceNum) {
     currentDatacenter = datacenter;
     connectionNum = num;
@@ -70,6 +129,8 @@ void Connection::suspendConnection() {
 void Connection::suspendConnection(bool idle) {
     reconnectTimer->stop();
     waitForReconnectTimer = false;
+    mtProxyReconnectBackoffMs = 0;
+    mtProxyReconnectHoldUntil = 0;
     if (connectionState == TcpConnectionStageIdle || connectionState == TcpConnectionStageSuspended) {
         return;
     }
@@ -92,6 +153,8 @@ void Connection::onReceivedData(NativeByteBuffer *buffer) {
     AES_ctr128_encrypt(buffer->bytes(), buffer->bytes(), buffer->limit(), &decryptKey, decryptIv, decryptCount, &decryptNum);
 
     failedConnectionCount = 0;
+    mtProxyReconnectBackoffMs = 0;
+    mtProxyReconnectHoldUntil = 0;
 
     if (connectionType == ConnectionTypeGeneric || connectionType == ConnectionTypeTemp || connectionType == ConnectionTypeGenericMedia) {
         receivedDataAmount += buffer->limit();
@@ -303,6 +366,17 @@ void Connection::connect() {
     }
     if (connectionState == TcpConnectionStageConnected || connectionState == TcpConnectionStageConnecting) {
         return;
+    }
+    int64_t now = ConnectionsManager::getInstance(currentDatacenter->instanceNum).getCurrentTimeMonotonicMillis();
+    if (connectionType != ConnectionTypeProxy && mtProxyReconnectHoldUntil > now) {
+        uint32_t delay = (uint32_t) (mtProxyReconnectHoldUntil - now);
+        waitForReconnectTimer = true;
+        reconnectTimer->setTimeout(delay, false);
+        reconnectTimer->start();
+        if (LOGS_ENABLED) DEBUG_D("connection(%p, account%u, dc%u, type %d) mtproxy_startup reconnect_hold phase=%s delay_ms=%u", this, currentDatacenter->instanceNum, currentDatacenter->getDatacenterId(), connectionType, getProxyCheckDiagnostic(), delay);
+        return;
+    } else if (mtProxyReconnectHoldUntil != 0) {
+        mtProxyReconnectHoldUntil = 0;
     }
     connectionInProcess = true;
     connectionState = TcpConnectionStageConnecting;
@@ -701,6 +775,16 @@ void Connection::onDisconnectedInternal(int32_t reason, int32_t error) {
     ConnectionsManager::getInstance(currentDatacenter->instanceNum).onConnectionClosed(this, reason);
     connectionToken = 0;
 
+    const char *mtProxyReconnectDiagnostic = getProxyCheckDiagnostic();
+    uint32_t mtProxyReconnectDelay = 0;
+    if (connectionState == TcpConnectionStageIdle && connectionType != ConnectionTypeProxy && mtProxyDiagnosticNeedsReconnectBackoff(mtProxyReconnectDiagnostic)) {
+        int64_t now = ConnectionsManager::getInstance(currentDatacenter->instanceNum).getCurrentTimeMonotonicMillis();
+        mtProxyReconnectDelay = mtProxyNextReconnectBackoffMs(connectionType, mtProxyReconnectBackoffMs);
+        mtProxyReconnectBackoffMs = mtProxyReconnectDelay;
+        mtProxyReconnectHoldUntil = now + mtProxyReconnectDelay;
+        if (LOGS_ENABLED) DEBUG_D("connection(%p, account%u, dc%u, type %d) mtproxy_startup reconnect_backoff phase=%s delay_ms=%u failed=%u", this, currentDatacenter->instanceNum, currentDatacenter->getDatacenterId(), connectionType, mtProxyReconnectDiagnostic, mtProxyReconnectDelay, failedConnectionCount + 1);
+    }
+
     uint32_t datacenterId = currentDatacenter->getDatacenterId();
     if (connectionState == TcpConnectionStageIdle) {
         connectionState = TcpConnectionStageReconnecting;
@@ -726,10 +810,12 @@ void Connection::onDisconnectedInternal(int32_t reason, int32_t error) {
         if (error == 0x68 || error == 0x71) {
             if (connectionType != ConnectionTypeProxy) {
                 waitForReconnectTimer = true;
-                reconnectTimer->setTimeout(lastReconnectTimeout, false);
-                lastReconnectTimeout *= 2;
-                if (lastReconnectTimeout > 400) {
-                    lastReconnectTimeout = 400;
+                reconnectTimer->setTimeout(mtProxyReconnectDelay != 0 ? mtProxyReconnectDelay : lastReconnectTimeout, false);
+                if (mtProxyReconnectDelay == 0) {
+                    lastReconnectTimeout *= 2;
+                    if (lastReconnectTimeout > 400) {
+                        lastReconnectTimeout = 400;
+                    }
                 }
                 reconnectTimer->start();
             }
@@ -737,7 +823,7 @@ void Connection::onDisconnectedInternal(int32_t reason, int32_t error) {
             waitForReconnectTimer = false;
             if (connectionType == ConnectionTypeGenericMedia && currentDatacenter->isHandshaking(true) || connectionType == ConnectionTypeGeneric && (currentDatacenter->isHandshaking(false) || datacenterId == ConnectionsManager::getInstance(currentDatacenter->instanceNum).currentDatacenterId || datacenterId == ConnectionsManager::getInstance(currentDatacenter->instanceNum).movingToDatacenterId)) {
                 if (LOGS_ENABLED) DEBUG_D("connection(%p, account%u, dc%u, type %d) reconnect %s:%hu", this, currentDatacenter->instanceNum, currentDatacenter->getDatacenterId(), connectionType, hostAddress.c_str(), hostPort);
-                reconnectTimer->setTimeout(1000, false);
+                reconnectTimer->setTimeout(mtProxyReconnectDelay != 0 ? mtProxyReconnectDelay : 1000, false);
                 reconnectTimer->start();
             }
         }
@@ -759,6 +845,8 @@ void Connection::onConnected() {
     connectionState = TcpConnectionStageConnected;
     connectionToken = lastConnectionToken++;
     wasConnected = true;
+    mtProxyReconnectBackoffMs = 0;
+    mtProxyReconnectHoldUntil = 0;
     if (LOGS_ENABLED) DEBUG_D("connection(%p, account%u, dc%u, type %d) connected to %s:%hu", this, currentDatacenter->instanceNum, currentDatacenter->getDatacenterId(), connectionType, hostAddress.c_str(), hostPort);
     ConnectionsManager::getInstance(currentDatacenter->instanceNum).onConnectionConnected(this);
 }
