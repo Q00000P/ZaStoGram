@@ -100,9 +100,9 @@ static constexpr int32_t MT_PROXY_HANDSHAKE_GLOBAL_STRICT_ACTIVE_LIMIT = 1;
 static constexpr int64_t MT_PROXY_ENDPOINT_DNS_CACHE_TTL_MS = 30 * 60 * 1000;
 static constexpr int64_t MT_PROXY_ENDPOINT_DNS_COALESCE_MS = 750;
 static constexpr int64_t MT_PROXY_ENDPOINT_TCP_CONNECT_GATE_MS = 650;
-static constexpr int64_t MT_PROXY_ENDPOINT_BROWSER_NETWORK_COOLDOWN_MAX_MS = 45 * 1000;
-static constexpr int64_t MT_PROXY_ENDPOINT_QUIET_NETWORK_COOLDOWN_MAX_MS = 30 * 1000;
-static constexpr int64_t MT_PROXY_ENDPOINT_STRICT_NETWORK_COOLDOWN_MAX_MS = 90 * 1000;
+static constexpr int64_t MT_PROXY_ENDPOINT_INTERACTIVE_NETWORK_COOLDOWN_MAX_MS = 3500;
+static constexpr int64_t MT_PROXY_ENDPOINT_MEDIA_NETWORK_COOLDOWN_MAX_MS = 5000;
+static constexpr int64_t MT_PROXY_ENDPOINT_HEAVY_NETWORK_COOLDOWN_MAX_MS = 9000;
 static constexpr int64_t MT_PROXY_PLAIN_NO_RESPONSE_TIMEOUT_MS = 5500;
 static constexpr int64_t MT_PROXY_EARLY_APPDATA_DROP_MS = 2 * 60 * 1000;
 static constexpr int32_t MT_PROXY_ENDPOINT_RECIPE_MAX_LEVEL = 3;
@@ -777,7 +777,7 @@ static bool mtProxyEndpointFailureNeedsRecipe(const std::string &diagnostic) {
            || diagnostic == "post_handshake_no_appdata";
 }
 
-static int64_t mtProxyEndpointCooldownMs(MtProxyEndpointResilienceState &state, const std::string &diagnostic, int32_t mode) {
+static int64_t mtProxyEndpointCooldownMs(MtProxyEndpointResilienceState &state, const std::string &diagnostic, int32_t mode, int32_t priority) {
     mode = normalizeMtProxyConnectionPatternMode(mode);
     int32_t penalty = 1;
     bool networkFailure = diagnostic == "host_resolve_failed" || diagnostic == "tcp_not_connected";
@@ -800,22 +800,26 @@ static int64_t mtProxyEndpointCooldownMs(MtProxyEndpointResilienceState &state, 
     int64_t base;
     int64_t jitter;
     int64_t maxCooldown;
-    if (networkFailure && mode == MT_PROXY_CONNECTION_PATTERN_STRICT) {
-        base = 18000 + penalty * 14000;
-        jitter = secureRandomBounded(9001);
-        maxCooldown = MT_PROXY_ENDPOINT_STRICT_NETWORK_COOLDOWN_MAX_MS;
-    } else if (networkFailure && mode == MT_PROXY_CONNECTION_PATTERN_BROWSER) {
-        base = 10000 + penalty * 8000;
-        jitter = secureRandomBounded(6001);
-        maxCooldown = MT_PROXY_ENDPOINT_BROWSER_NETWORK_COOLDOWN_MAX_MS;
-    } else if (networkFailure && mode == MT_PROXY_CONNECTION_PATTERN_QUIET) {
-        base = 7000 + penalty * 5000;
-        jitter = secureRandomBounded(4501);
-        maxCooldown = MT_PROXY_ENDPOINT_QUIET_NETWORK_COOLDOWN_MAX_MS;
-    } else if (networkFailure) {
-        base = 2500 + penalty * 1500;
-        jitter = secureRandomBounded(1501);
-        maxCooldown = 12000;
+    if (networkFailure) {
+        bool genericNetworkFailure = priority <= MT_PROXY_HANDSHAKE_PRIORITY_GENERIC;
+        bool interactiveNetworkFailure = priority <= MT_PROXY_HANDSHAKE_PRIORITY_MEDIA;
+        if (mode == MT_PROXY_CONNECTION_PATTERN_STRICT) {
+            base = genericNetworkFailure ? 900 : (interactiveNetworkFailure ? 1300 : 2800);
+            jitter = secureRandomBounded(genericNetworkFailure ? 701 : (interactiveNetworkFailure ? 1001 : 2201));
+        } else if (mode == MT_PROXY_CONNECTION_PATTERN_BROWSER) {
+            base = genericNetworkFailure ? 650 : (interactiveNetworkFailure ? 950 : 2200);
+            jitter = secureRandomBounded(genericNetworkFailure ? 601 : (interactiveNetworkFailure ? 801 : 1601));
+        } else if (mode == MT_PROXY_CONNECTION_PATTERN_QUIET) {
+            base = genericNetworkFailure ? 750 : (interactiveNetworkFailure ? 1100 : 2400);
+            jitter = secureRandomBounded(genericNetworkFailure ? 651 : (interactiveNetworkFailure ? 901 : 1701));
+        } else {
+            base = genericNetworkFailure ? 350 : (interactiveNetworkFailure ? 500 : 900);
+            jitter = secureRandomBounded(genericNetworkFailure ? 351 : (interactiveNetworkFailure ? 451 : 801));
+        }
+        base += penalty * (genericNetworkFailure ? 250 : (interactiveNetworkFailure ? 450 : 900));
+        maxCooldown = genericNetworkFailure
+                ? MT_PROXY_ENDPOINT_INTERACTIVE_NETWORK_COOLDOWN_MAX_MS
+                : (interactiveNetworkFailure ? MT_PROXY_ENDPOINT_MEDIA_NETWORK_COOLDOWN_MAX_MS : MT_PROXY_ENDPOINT_HEAVY_NETWORK_COOLDOWN_MAX_MS);
     } else if (mode == MT_PROXY_CONNECTION_PATTERN_STRICT) {
         base = 3500 + penalty * 2200;
         jitter = secureRandomBounded(3001);
@@ -2269,7 +2273,7 @@ void ConnectionSocket::recordMtProxyEndpointFailure(const char *diagnostic, cons
     pthread_mutex_lock(&proxyHandshakeSchedulerMutex);
     MtProxyEndpointResilienceState &state = proxyEndpointResilience[stateKey];
     if (mtProxyEndpointFailureNeedsCooldown(phase)) {
-        cooldown = mtProxyEndpointCooldownMs(state, phase, connectionPatternMode);
+        cooldown = mtProxyEndpointCooldownMs(state, phase, connectionPatternMode, proxyHandshakeAdmissionPriority);
         if (cooldown > 0 && state.cooldownUntil < now + cooldown) {
             state.cooldownUntil = now + cooldown;
         }
@@ -2283,7 +2287,7 @@ void ConnectionSocket::recordMtProxyEndpointFailure(const char *diagnostic, cons
         recipeLevel = recipeState.recipeLevel;
     }
     pthread_mutex_unlock(&proxyHandshakeSchedulerMutex);
-    if (LOGS_ENABLED) DEBUG_D("connection(%p) mtproxy_startup endpoint_failure key=%s phase=%s reason=%s connection_pattern=%s cooldown_ms=%ld recipe_level=%d", this, stateKey.c_str(), phase.c_str(), reason != nullptr ? reason : "unknown", mtProxyConnectionPatternModeName(connectionPatternMode), (long) cooldown, recipeLevel);
+    if (LOGS_ENABLED) DEBUG_D("connection(%p) mtproxy_startup endpoint_failure key=%s phase=%s reason=%s connection_pattern=%s priority=%d cooldown_ms=%ld recipe_level=%d", this, stateKey.c_str(), phase.c_str(), reason != nullptr ? reason : "unknown", mtProxyConnectionPatternModeName(connectionPatternMode), proxyHandshakeAdmissionPriority, (long) cooldown, recipeLevel);
 }
 
 void ConnectionSocket::recordMtProxyEndpointSuccess(const char *reason) {

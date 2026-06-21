@@ -121,10 +121,17 @@ def main():
     require(
         "networkFailure" in cooldown_body
         and 'diagnostic == "host_resolve_failed" || diagnostic == "tcp_not_connected"' in cooldown_body
-        and "MT_PROXY_ENDPOINT_BROWSER_NETWORK_COOLDOWN_MAX_MS" in cooldown_body
-        and "MT_PROXY_ENDPOINT_QUIET_NETWORK_COOLDOWN_MAX_MS" in cooldown_body
-        and "MT_PROXY_ENDPOINT_STRICT_NETWORK_COOLDOWN_MAX_MS" in cooldown_body,
-        "pre-TCP host/DNS failures must use the stronger host:port network cooldown instead of the short handshake cooldown",
+        and "priority" in cooldown_body
+        and "interactiveNetworkFailure" in cooldown_body
+        and "MT_PROXY_ENDPOINT_INTERACTIVE_NETWORK_COOLDOWN_MAX_MS" in cooldown_body
+        and "MT_PROXY_ENDPOINT_HEAVY_NETWORK_COOLDOWN_MAX_MS" in cooldown_body
+        and "MT_PROXY_ENDPOINT_BROWSER_NETWORK_COOLDOWN_MAX_MS" not in cooldown_body,
+        "pre-TCP host/DNS failures must use short priority-aware network cooldowns, not old long endpoint-wide waits",
+    )
+    require(
+        "mtProxyEndpointCooldownMs(state, phase, connectionPatternMode, proxyHandshakeAdmissionPriority)" in socket
+        and "priority=%d cooldown_ms" in socket,
+        "endpoint failure recording must pass connection priority into cooldown calculation and log it",
     )
     require(
         "recordMtProxyEndpointFailure(proxyCheckDiagnostic.c_str()" in socket,

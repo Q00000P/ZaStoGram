@@ -204,6 +204,28 @@ def main() -> None:
         and "mtProxyReconnectHoldUntil" in connection_h,
         "Connection layer must back off MTProxy pre-TCP and handshake reconnects instead of restarting generic/media every second",
     )
+    reconnect_base = connection_cpp[
+        connection_cpp.find("static uint32_t mtProxyReconnectBackoffBaseMs"):
+        connection_cpp.find("static uint32_t mtProxyReconnectBackoffMaxMs")
+    ]
+    reconnect_max = connection_cpp[
+        connection_cpp.find("static uint32_t mtProxyReconnectBackoffMaxMs"):
+        connection_cpp.find("static uint32_t mtProxyReconnectJitterMs")
+    ]
+    require(
+        "return 1800;" in reconnect_base
+        and "return 2500;" in reconnect_base
+        and "return 3500;" in reconnect_base
+        and "return 8000;" not in reconnect_base,
+        "Connection reconnect base backoff must stay responsive; endpoint/TCP gates already prevent retry storms",
+    )
+    require(
+        "return 8000;" in reconnect_max
+        and "return 12000;" in reconnect_max
+        and "return 16000;" in reconnect_max
+        and "return 30000;" not in reconnect_max,
+        "Connection reconnect max backoff must not grow to 30s for media/download while the user is actively waiting",
+    )
     host_timer_index = socket_cpp.find("if (mode == MT_PROXY_HANDSHAKE_TIMER_HOST_RESOLVE)")
     host_request_index = socket_cpp.find("requestPendingHostResolve();", host_timer_index)
     host_method_index = socket_cpp.find("void ConnectionSocket::requestPendingHostResolve()")

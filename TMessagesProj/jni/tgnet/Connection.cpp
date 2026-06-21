@@ -60,15 +60,15 @@ static uint32_t mtProxyReconnectBackoffBaseMs(ConnectionType type) {
     switch ((int32_t) type & 0x0000ffff) {
         case ConnectionTypeGeneric:
         case ConnectionTypeTemp:
-            return 3000;
+            return 1800;
         case ConnectionTypeGenericMedia:
         case ConnectionTypePush:
-            return 5000;
+            return 2500;
         case ConnectionTypeDownload:
         case ConnectionTypeUpload:
-            return 8000;
+            return 3500;
         default:
-            return 5000;
+            return 2500;
     }
 }
 
@@ -76,15 +76,15 @@ static uint32_t mtProxyReconnectBackoffMaxMs(ConnectionType type) {
     switch ((int32_t) type & 0x0000ffff) {
         case ConnectionTypeGeneric:
         case ConnectionTypeTemp:
-            return 15000;
+            return 8000;
         case ConnectionTypeGenericMedia:
         case ConnectionTypePush:
-            return 20000;
+            return 12000;
         case ConnectionTypeDownload:
         case ConnectionTypeUpload:
-            return 30000;
+            return 16000;
         default:
-            return 20000;
+            return 12000;
     }
 }
 
