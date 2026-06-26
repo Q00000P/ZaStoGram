@@ -89,7 +89,7 @@ public final class ZaStoEditHistoryStore {
         public final int date;
         public final String text;
 
-        Version(int date, String text) {
+        public Version(int date, String text) {
             this.date = date;
             this.text = text;
         }
